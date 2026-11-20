@@ -153,6 +153,13 @@ object UpdateApi {
 
     // ---- small disk cache (body + ETag) ----
 
+    /**
+     * The last release body we successfully fetched — no network at all.
+     * Used inside the quiet window so a launch after a check costs nothing.
+     */
+    fun cachedRelease(): ReleaseInfo? =
+        readBody()?.let { raw -> runCatching { parse(raw) }.getOrNull() }
+
     private fun readBody(): String? = runCatching {
         bodyFile.takeIf { it.exists() }?.readText()?.takeIf { it.isNotBlank() }
     }.getOrNull()

@@ -168,8 +168,10 @@ object UpdateManager {
      * Off the cached release body only — no request. Used inside the quiet
      * window so a box that already knows about a release still offers it.
      */
-    private suspend fun offerFromCache(skipped: String?) {
-        val release = runCatching { UpdateApi.latest() }.getOrNull() ?: return
+    private fun offerFromCache(skipped: String?) {
+        // Strictly from disk: inside the quiet window a launch must not make a
+        // single request, otherwise the throttle would not throttle anything.
+        val release = UpdateApi.cachedRelease() ?: return
         if (!UpdateApi.isNewer(release.tag, versionName)) return
         if (release.apkUrl.isNullOrBlank()) return
         if (skipped != null && skipped == release.tag) return
