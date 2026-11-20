@@ -130,7 +130,20 @@ APK: `app/build/outputs/apk/debug/app-debug.apk`
 
 ---
 
-## 5. Still to verify on a real TV / box
+## 5. Self-update
+
+The app updates itself from `github.com/aashish1332/Manime-tv` releases. The
+full flow, the failure handling and the publishing checklist live in
+`FEATURE_AUDIT.md` (section "Self-update"). Two rules matter for performance:
+
+1. The launch check runs 5 s behind the feed build on its own OkHttp client,
+   so it can never compete with the home refresh for the launch network.
+2. Inside the 6-hour quiet window it reads the cached release body from disk
+   and makes **no request at all**.
+
+---
+
+## 6. Still to verify on a real TV / box
 
 No adb device or emulator is available on this machine, so everything below is
 **compile + package verified only**, not runtime verified.
