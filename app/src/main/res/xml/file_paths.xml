@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Release APKs land in cache/updates (see ApkUpdater.download). The
+         installer reads them through this provider: a content:// URI is the
+         only kind of file the package manager accepts on modern Android. -->
+    <cache-path name="updates" path="updates/" />
+</paths>

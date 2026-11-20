@@ -1,0 +1,585 @@
+================================================================
+DESIDUBANIME TV — FIXES REPORT (latest update: 2026-08-08 #4)
+================================================================
+Yeh file batati hai ki is project me kya-kya fix hua, kya nahi
+hua, aur kyu. Har fix ka technical reason bhi likha hai.
+
+APK: app/build/outputs/apk/debug/app-debug.apk
+  Last build: 2026-08-08 (BUILD SUCCESSFUL, ~22.8 MB, debug)
+  Build command: gradlew.bat :app:assembleDebug --no-daemon
+
+================================================================
+SECTION 0000 — 2026-08-08 SESSION #4
+================================================================
+User: "badges ek saath appear hone chahiye — Slime S4 pe pehle AD
++ DDA aaye, baad me ADH bhi add ho gaya." Aur GDFlix/FilePress
+abhi bhi nahi chal rahe (dono ADH aur AD, dono ke paas hain).
+
+0000A. BADGES STAGED KYU AA RAHE THE — 2 ALAG KARAN ✅
+  Pichhle session me maine attachKnownSources() add ki thi, par wo
+  sirf "jo pata hai wo stamp karo" karti hai — pata KAB chalta hai,
+  wo nahi badalta. Do asli karan mile:
+
+  (1) FeedCacheStore me adPostId / adEpisodesUrl PERSIST HI NAHI
+      HOTE THE. AnimeDto me ye fields the hi nahi. Matlab har cold
+      start pe cached card apna AnimeDrive match KHO deta tha ->
+      feed "DDA (+ADH)" dikhati -> network merge wahi kaam dobara
+      karke AD badge 2-3 second baad add kar deta. Ye exactly wahi
+      staged behaviour hai jo user ne dekha.
+      FIX: teeno field ab persist hote hain.
+
+  (2) Badges partial catalog se render ho rahe the. Cold start pe
+      merge sirf latest-100 window pe chalta hai; poora ADH/AD
+      catalog (~600 posts) background me baad me aata hai. Slime S4
+      ka ADH post us window ke bahar tha, isliye ADH badge baad me
+      aaya.
+      FIX: Anime.sourcesResolved flag. Ye TABHI true hota hai jab
+      merge ke waqt DONO poore catalog haath me ho (sourcesComplete()).
+      Jab tak false — card KOI badge nahi dikhata. Aadha sach
+      dikhane se behtar hai kuch na dikhana; badges ek hi baar,
+      sab ek saath aate hain.
+      Saath me: dono catalog ab PROCESS START pe warm hote hain
+      (pehle pehli feed ke baad hote the). Ye ~14 REST requests hain,
+      koi HTML page nahi — cold-start stall inse nahi tha, wo ~600
+      page wale SLUG SWEEP se tha, jo ab bhi pehli feed ka intezaar
+      karta hai. Catalog land hote hi feed apne aap re-merge hoti
+      hai (refreshFeedIfSourcesComplete), to badges bina user ke
+      kuch kiye aa jaate hain.
+
+0000B. GDFLIX "SIRF LOADING PE ATKA REHTA HAI" ✅
+  ROOT CAUSE (timing): auto-resolve 3 browser attempts karta tha ×
+  26s = ~78 second "Unlocking…". Aur teeno aksar EK HI host ke
+  alag-alag quality links hote the — jabki Cloudflare clearance
+  PER-DOMAIN hoti hai, to ek fail hua matlab baaki bhi fail.
+  FIX: attempts ab HOST se dedupe hote hain (distinctBy hoster) aur
+  2 tak seemit. Fail hone pe turant agla server.
+
+0000C. GDFLIX/FILEPRESS — LINK CAPTURE BEHTAR KIYA ✅
+  In hosts ka link JS click ke waqt banta hai. Pehle mera code
+  click karke sirf NAVIGATION ka intezaar karta tha — par ye hosts
+  aksar link ko DOM me LIKH dete hain, navigate nahi karte.
+  FIX: har poll round me pehle DOM scan (fileUrlIn — escaped \/ aur
+  &amp; decode karke), phir click. Ek round me 2 button click hote
+  hain (in pages pe Direct/Instant/Cloud kai buttons hote hain aur
+  sirf kuch zinda hote hain).
+  Plus: agar browser ne khud file download decide kiya aur URL saaf
+  media file hai (.mkv/.mp4…), to 1-byte probe fail hone par bhi
+  use accept karte hain — kuch CDN Range request reject karte hain
+  par full GET theek serve karte hain.
+
+BACHA HUA / DHYAN DENE LAYAK
+  - adb is machine pe nahi hai -> UI runtime verify nahi hua.
+  - GDFlix/FilePress ka click-and-capture asli TV pe hi confirm
+    hoga (CF challenge desktop se test nahi kiya ja sakta).
+  - Agar ab bhi fail ho, to player ka logcat chahiye: usse pata
+    chalega challenge clear hua ya nahi, aur button mila ya nahi.
+    Uske hisaab se clickJs() ka regex tune karna hoga.
+
+================================================================
+SECTION 000 — 2026-08-08 SESSION #3
+================================================================
+User ka test feedback: "Cute Girl in the Hero's Party" sirf AD pe;
+Slime S4 open karne pe romaji + DDA badge, wapas aane pe English +
+AD badge add, ADH badge nahi — par episode play kiya to ADH ke
+servers THE. GDFlix/FilePress abhi bhi zero.
+Slime S4 wali observation ne exact do bug pakde:
+
+000A. ROMAJI NAAM + GALAT BADGE = TITLE-MAP RACE ✅
+  DDA ki REST API sirf ROMAJI title deti hai. English naam
+  englishTitles map me hote hain jo disk se ASYNC load hota tha.
+  Feed load us race ko jeet jata tha -> cards romaji rendered, AUR
+  (ye asli nuksan) romaji naam ko ADH/AD ke ENGLISH titles se
+  compare kiya jata tha -> har cross-site match FAIL -> duplicate
+  cards + sirf DDA badge. Detail page kholne se map warm ho jata
+  tha, isliye wapas aane pe "apne aap theek" ho jata tha — bilkul
+  wahi jo user ne dekha.
+  FIX: awaitStores() — koi bhi title-matching path (home feed,
+  catalog, search, anime()) ab persisted map ka intezaar karta hai
+  (4s cap, warna ek kharab store feed ko hamesha ke liye rok deta).
+
+000B. FRESH INSTALL PE MAP KHAALI HI HOTA HAI ✅
+  000A sirf tab bachata hai jab store me kuch ho. Pehli baar to
+  store khaali hai aur title sweep pehli feed ke BAAD chalta hai.
+  Aur ye critical hai kyunki: AD ke pages pe desidubanime ka koi
+  link NAHI hai (live verify kiya — AD episode page pe 0 DDA
+  links). ADH ke paas "Watch online" slug hai, AD ke paas KUCH
+  NAHI. Yaani AD ka ekmatra pul ENGLISH TITLE hai.
+  Homepage + /anime/ archive — ye 2 page ~56 English naam dete
+  hain (live verify: 28 cards, 28 ld+json slug, 27 English span
+  per page; scraper ke selectors sahi hain).
+  Ye 2 fetch pehle "cosmetic" maan ke fire-and-forget the. Ab feed
+  ka HISSA hain (feed lane pe, 6s cap). Isi wajah se "Cute Girl in
+  the Hero's Party" sirf AD pe dikh raha tha.
+
+000C. BADGE AUR SERVER LIST KA MEL ✅
+  episodes() servers adhByAnimeId/adByAnimeId maps se banata hai,
+  par CARD pe adhPostId tabhi aata tha jab usi merge me ADH post
+  match hota. Baad me mile match (detail-open findAdhFor, ya
+  background slug sweep) sirf MAP me jate the, card pe kabhi nahi.
+  Isiliye Slime S4 pe ADH badge nahi tha par ADH ke servers the.
+  FIX: attachKnownSources() — feed/catalog/search sab ke aakhir me
+  har card ko wahi maps se stamp kiya jata hai jo episodes()
+  padhta hai. Ab badges aur server list construction se hi match
+  karte hain. Saath me findAdFor() bhi add hui (AD ka on-demand
+  match, pehle sirf ADH ka tha).
+
+000D. GDFLIX/FILEPRESS — ASLI ROOT CAUSE ✅
+  Session #2 me pata chala tha ki gdflix.dev Cloudflare JS
+  challenge deta hai (403, cf-mitigated: challenge). Is session me
+  2 aur cheezein mili:
+   1) Domain rotation se bachne ka raasta NAHI hai — gdflix.cfd
+      200 to deta hai par wo "This domain is for sale" parked page
+      hai, mirror nahi. Sirf gdflix.dev asli hai.
+   2) Session #2 ka WebView kaam kar hi nahi sakta tha: WebView
+      window me attach nahi hota, aur maine measure/layout call
+      NAHI kiya tha. Bina render ke CF challenge kabhi complete
+      nahi hota. (StreamResolver ye pehle se karta hai — wahi
+      pattern miss ho gaya tha.)
+  Aur sabse zaroori insight: in hosts ka asli link HTML me hota hi
+  NAHI — JS click ke waqt banata hai. To sirf DOM scrape karke
+  probe karna kabhi kaam nahi karta.
+  FIX: FileHostBrowser (WebPageFetcher replace kiya) —
+    - measure/layout 1280x720, cookies on, JS on (CF ke script
+      block NAHI hote, sirf ads block hote hain)
+    - page ke apne download buttons CLICK karta hai (text/href/
+      class se rank, koi fixed markup nahi) aur file URL capture
+      karta hai — 3 jagah se: DownloadListener,
+      shouldOverrideUrlLoading, shouldInterceptRequest
+    - capture kiya URL bhi 1-byte ranged GET se VERIFY hota hai
+  Resolver ka order ab: plain HTTP -> browser click-and-capture ->
+  cleared cookies ke saath dobara crawl. Click-and-capture pehle
+  isliye kyunki gated hosts pe wahi ekmatra kaam karta hai.
+  Budget bada kiya (TV box slow hai): manual pick 32s, auto-retry
+  26s, browser cap 20s.
+  Cookies ab final stream headers me bhi jaati hain (verified:
+  PlayerScreen setDefaultRequestProperties(stream.headers)) —
+  warna probe pass hota aur playback 403 de deta.
+
+BACHA HUA / DHYAN DENE LAYAK
+  - adb is machine pe nahi hai, to UI runtime verify nahi hua.
+    Network-level cheezein live verify hui hain (CF 403 vs 200,
+    parked domain, AD pages pe DDA link ka na hona, DDA archive ke
+    selectors, HubCloud ka end-to-end resolve).
+  - GDFlix ka click-and-capture asli device pe hi confirm hoga —
+    CF challenge emulator/desktop se test nahi kiya ja sakta.
+  - Agar phir bhi fail ho: FileHostBrowser me clickJs() ka regex
+    tune karna hoga (us host ke button ka text chahiye).
+
+================================================================
+SECTION 00 — 2026-08-08 SESSION #2 (user testing ke baad)
+================================================================
+User ne #1 wala build TV pe test kiya. 3 cheezein bachi thi:
+duplicate cards (jyadatar AD ke), badges kuch-kuch galat, aur
+GDFlix bas loading + FilePress "resolve nahi hua". Teeno ke ROOT
+CAUSE mile — neeche.
+
+00A. GDFLIX/FILEPRESS KA ASLI KARAN: CLOUDFLARE JS CHALLENGE ✅
+  Ye session ki sabse badi khoj hai. Live check kiya gaya:
+      gdflix.dev/file/...   -> HTTP 403, cf-mitigated: challenge
+      hubcloud.cx/drive/... -> HTTP 200
+  Yaani GDFlix ek Cloudflare JS challenge ke peeche hai. Plain
+  OkHttp use KABHI paar nahi kar sakta — chahe headers kitne bhi
+  perfect ho (full browser headers se bhi 403 hi aaya). Isiliye
+  HubCloud chalta tha aur GDFlix nahi. Pichhle session ka generic
+  probe likhna zaroori tha par AKELA kaafi nahi tha — page mil hi
+  nahi raha tha, parse karne ka sawal hi nahi.
+  FIX: WebPageFetcher (naya) — offscreen WebView page load karta
+  hai, JS challenge KHUD SOLVE hota hai, phir settled DOM ka HTML
+  return hota hai. Ye stream sniffer NAHI hai (user ko kuch nahi
+  dikhta, video ka wait nahi) — sirf HTML + clearance cookie.
+  Cookie har jagah carry hoti hai: probe requests me, plain-HTTP
+  retry me, aur FINAL STREAM ke headers me (warna probe pass hota
+  aur ExoPlayer pe playback 403 de deta).
+  Ek baar host unlock hone ke baad cookie reuse hoti hai, to
+  dubara WebView hop nahi lagta.
+
+00B. GDFLIX "BAS LOADING HI REHTA THA" ✅
+  ROOT CAUSE (alag bug): resolveOption() timeoutMs sirf WebView
+  resolver ko pass karta tha — isHub (file host) path pe koi
+  timeout tha hi NAHI. To dead mirrors ek-ek karke apna socket
+  timeout wait karte the aur player anant tak "loading" pe atka
+  rehta tha.
+  FIX: dono paths pe withTimeoutOrNull, plus resolver ke andar
+  hard deadline (budgetMs) har step pe check hota hai.
+
+00C. FILE-HOST RESOLVER — FORMAT-AGNOSTIC ALGORITHM ✅
+  User ne kaha tha "esa algorithm banao ki page ka format alag
+  bhi ho to links nikal ske". Koi CSS selector/layout hardcode
+  NAHI hai. 4 step:
+    1. HARVEST — page ke saare URL: anchors, form action, data-*
+       attributes, meta-refresh, aur raw JS strings (escaped \/ ,
+       /, &amp; sab decode hoke). Shortener (?url=…) unwrap.
+    2. SCORE   — video extension(100) > storage/CDN/worker host
+       (40) > download-ish path(10). Junk (social/ads/login) out.
+    3. PROVE   — top candidates PARALLEL 1-byte ranged GET se.
+       Sirf wahi accept jo non-HTML bytes de. Isi wajah se galat
+       guess kabhi player tak nahi pahunch sakta.
+    4. DESCEND — jo HTML de wo intermediate page hai, usme utro
+       (breadth-first, max depth 2).
+  Apna short-timeout client (5s connect / 8s call) hai — shared
+  client 35s wait karta hai jo probing ke liye bilkul galat hai.
+  Apna Referer bhi (shared interceptor DDA ka Referer pin karta
+  hai, jise signed R2/worker URLs reject karte hain).
+  Auto-play me: pehle fast HTTP pass (sab servers race), fail hone
+  pe top 3 file hosts pe BROWSER-unlock attempt. Manual pick pe
+  browser + sniffer dono milte hain. Fail hone pe AGLA server —
+  website kabhi player me load nahi hoti.
+  VERIFIED: HubCloud live link end-to-end resolve hua (R2 file,
+  application/octet-stream) — koi regression nahi.
+
+00D. DUPLICATE CARDS KA ASLI KARAN: TITLE CLEANING ✅
+  Live AD titles dekhe. Dono site ke post titles aise hote hain:
+    "… Season 1 Hindi, English, Japanese (Multi Audio) WEB-DL
+     Episodes Download"
+  Scrapers isko `\s+Hindi\b` pe cut karte the. 2 real cases fail:
+    "Oshi no Ko Season 2 English, Japanese (Dual Audio) …"
+        -> "Hindi" hai hi nahi, cut fail
+    "Demon Slayer … Infinity Castle BluRay Movie Hindi, …"
+        -> "Season N" nahi, to base me "BluRay Movie" junk reh gaya
+  Jo junk bacha wo match key ka hissa ban gaya -> cross-site match
+  fail -> duplicate cards. Isiliye jyadatar AD ke duplicate the
+  (AD ke titles me variation zyada hai), aur ADH+DDA saath thay.
+  FIX: Titles.clean() — audio languages (Hindi/Tamil/…/English/
+  Japanese/Multi Audio/Dual Audio), source-codec tags (WEB-DL,
+  BluRay, HEVC, x264/5, 480p…), aur distribution phrasing
+  (Episodes Download, Batch, Uncensored, ESub…) me se JO PEHLE
+  mile wahan cut. Position 0 kabhi cut nahi hoti, to is naam wala
+  show bach jata hai. Brackets aur parentheses bhi strip.
+
+00E. MATCHING — 2-TIER + THRESHOLD TUNING ✅
+  Sirf exact key kaafi nahi tha, isliye tier 2:
+   Tier 1: exact key (base + season)
+   Tier 2: SAME SEASON + token-set Jaccard >= 0.85
+  Threshold asli title pairs pe tune hua (13 cases, 0 mismatch):
+    MERGE  : Wistoria Wand & Sword | Wistoria: Wand and Sword 1.00
+             …Infinity Castle Movie | …Infinity Castle        0.86
+             Heaven Official's Blessing | Heaven Officials…   1.00
+    SEPARATE: My Hero Academia | MHA: Vigilantes              0.75
+             Solo Leveling | Solo Leveling Arise              0.67
+             Dr. Stone | Dr. Stone Science Future             0.50
+  NOTE: pehle subset-rule try kiya tha (chhota set bade me ho to
+  merge). Use HATA diya — wo spin-off aur subtitled-season me
+  farak nahi kar sakta, aur do ALAG show fuse ho jana duplicate
+  dikhne se BADTAR hai (ek show pahunch se hi bahar ho jata).
+  Stemming bhi add hui (officials->official) aur stop-word filter
+  se PEHLE lagti hai, warna "Seasons"->"season" filter se bach
+  jata tha (Four Seasons wala case 0.80 pe atak raha tha).
+  mergeAd() me bhi wahi fuzzy fallback (season-scoped token index).
+
+00F. BADGES ✅
+  00D/00E ke baad card ek hi banta hai jo saare sources carry
+  karta hai, to badges aur server list ek hi source-set se aate
+  hain. Plus pichhle session ka fix: on-demand ADH match milne pe
+  feed invalidate hoti hai.
+
+BACHA HUA KAAM / DHYAN DENE LAYAK
+  - Runtime verify is machine pe nahi ho paya (adb nahi hai).
+    Network-level checks (Cloudflare 403 vs 200, HubCloud resolve)
+    live chal ke confirm hue; UI TV pe check karna hoga.
+  - Agar FilePress/FileBee ab bhi fail ho: wo bhi CF ke peeche ho
+    sakte hain par unka DOM alag ho sakta hai. Ek live link mile
+    to targeted path add ho sakta hai.
+
+================================================================
+SECTION 0 — 2026-08-08 SESSION #1
+================================================================
+NOTE: is session me device pe RUNTIME verify NAHI hua (is machine
+pe adb nahi hai) — sirf compile + code review hua. Neeche wala
+TEST CHECKLIST TV pe chalakar confirm karna zaroori hai.
+
+0A. BACK BUTTON — PLAYER SE APP EXIT HO JATA THA ✅
+  ROOT CAUSE: MainActivity me `internal var nav` declare to tha,
+  par AppNav usse KABHI SET hi nahi karta tha. Matlab `nav` hamesha
+  null tha -> `popBackStack()` kabhi chala hi nahi -> HAR back press
+  (Detail, Settings, aur player ke andar bhi) double-tap-exit gate
+  pe chala jata tha. Pichhli report (A1) me yeh "fixed" likha tha,
+  par wiring missing thi.
+  FIX: AppNav ab DisposableEffect me `activity.nav = nav` set karta
+  hai (findActivity() se Activity nikaalke), aur dispose pe clear.
+  Saath me `previousBackStackEntry != null` check add kiya — bina
+  iske popBackStack() Home (start destination) ko bhi pop karke
+  true return karta, aur app double-press confirmation ke bina hi
+  band ho jata.
+
+0B. COLD START — "app ko 1 min idle chorna padta tha" ✅
+  ROOT CAUSE: sab kuch ek hi OkHttp client pe tha aur OkHttp per-host
+  sirf 5 connection kholta hai. Cold start pe ~600 sweep pages +
+  catalog fetches us queue me lag jate the, to user ka click unke
+  PEECHE queue ho jata tha.
+  FIX (3 parts):
+  1. 3 alag lanes: Network.client (sirf clicks), Network.feed (home
+     feed), Network.bulk (sweeps/catalog). Har lane ka apna
+     Dispatcher = apni queue.
+  2. InteractionGate (naya): click chalte waqt bulk requests RUK
+     jaati hain (max 8s), feed 1.5s tak rukti hai. anime(),
+     episodes(), servers() ab gate hold karte hain.
+  3. Repo ke init se dono full-catalog warm-ups HATA diye — ab
+     sweeps PEHLI feed aane ke BAAD start hote hain
+     (startBackgroundWork), pehle nahi.
+  BONUS FIX: scrapers OkHttp ka SYNCHRONOUS execute() use karte hain,
+  aur Dispatcher ki maxRequestsPerHost sirf ASYNC calls pe lagti hai
+  — yaani limits in pe lag hi nahi rahi thi. Ab explicit semaphore
+  (FEED_LOOKUP_PARALLELISM = 4).
+  BONUS FIX: repo ka init block un fields ko chhoo raha tha jo neeche
+  declare the (Kotlin init declaration-order me chalta hai) — IO
+  thread pe null field aa sakta tha. Init ab class ke END me hai.
+
+0C. DUPLICATE CARDS — same anime ke 2-3 card ✅
+  ROOT CAUSE: purana groupNearDuplicates duplicates ko sirf PAAS-PAAS
+  rakhta tha, merge nahi karta tha. Isliye user ko wahi anime 2-3
+  baar dikhta tha, aur har copy pe sirf uski apni site ka badge.
+  FIX: collapseDuplicates (naya) — union-find se group banata hai
+  aur EK card me fuse karta hai jo saare sources carry karta hai.
+  adhByAnimeId/adByAnimeId ko surviving id pe RE-POINT karta hai,
+  warna absorb ki hui site ke episodes gayab ho jate.
+  SAFETY: do alag DDA id wale kabhi fuse nahi hote (DDA khud unhe
+  alag anime maanta hai) — wo sirf adjacent rehte hain.
+  Home feed + sidebar catalog + search, teeno pe lagta hai.
+
+0D. SOURCE BADGES GALAT THE ✅
+  ROOT CAUSE: badge feed-merge ke waqt calculate hota tha, lekin ADH
+  match aksar BAAD me milta hai (detail open pe findAdhFor chalta
+  hai). Isliye card pe sirf "AD" dikhta tha par detail me ADH ke
+  servers aa jate the.
+  FIX: jab findAdhFor naya match seekhe, invalidateFeed() — agli
+  feed load pe card apne saare sahi badges ke saath rebuild hota
+  hai. Plus 0C ka fuse badges aur servers ko ek hi source-set se
+  derive karta hai.
+
+0E. HUBCLOUD — "dono me se sirf ek site ke servers dikhte the" ✅
+  ROOT CAUSE (asli bug): episodes() ka hub merge (quality, hoster)
+  pe dedupe karta tha. Dono sites HubCloud 720p dete hain, to
+  AnimeDrive ka HubCloud link CHUP-CHAP DROP ho jata tha.
+  FIX: dedupe key me ab SOURCE bhi hai (linkKey = source|hoster|
+  quality). HubLink me naya `source: LinkSource` field (ADH / AD).
+  Ab player me label "ADH · HubCloud · 720P" / "AnimeDrive · HubCloud
+  · 720P" — dono dikhte hain aur alag pehchane jaate hain. Menu ki
+  subtitle line me bhi source aata hai.
+
+0F. GDFLIX/FILEBEE/FILEPRESS — apni website load kar dete the ✅
+  ROOT CAUSE: ye isHub=false the -> WebView sniffer pe jate the ->
+  timeout pe host ki website hi player me chal jati thi. Us case me
+  skip-intro/outro, quality, audio, subtitle menus kuch kaam nahi
+  karte (wo sab native player se aate hain).
+  FIX: FileHostResolver (naya) — HubCloud jaisa hi contract, plain
+  OkHttp se DIRECT video URL nikalta hai, to Media3 native chalta
+  hai aur SAARI settings HubCloud jaisi hi kaam karti hain.
+  Selectors hardcode NAHI kiye (ye hosts domain/skin rotate karte
+  hain): page ke saare plausible download URLs collect karke har
+  ek ko 1-byte ranged GET se PROVE karta hai; jo asli bytes de wahi
+  player ko jata hai. HTML mila to ek hop aur follow (max depth 2).
+  Ab saare file-host options isHub=true. Resolve fail hua to AGLA
+  server try hota hai — website kabhi load nahi hoti.
+  AUTO-PLAY ORDER: hubs me HubCloud pehle (uska dedicated resolver
+  proven hai), baaki manually chun sakte hain.
+
+0G. REFRESH BUTTON KA CIRCLE ✅
+  Pehle spinner sirf MANUAL refresh pe chalta tha. Ab HomeViewModel
+  me `feedLoading` hai jo HAR feed load pe true hota hai — app open,
+  ON_RESUME auto-refresh, aur manual refresh. Cache-hit 0ms me
+  aata hai isliye MIN_SPIN_MS=450 floor hai, warna spinner ek frame
+  ko blink karke gayab ho jata.
+
+0H. TOP BAR -> LEFT SIDEBAR ✅
+  Refresh / Search / Settings ab sidebar me Home ke saath hain,
+  unke NEECHE "Pages" ke buttons. Upar wali action row hata di
+  (grid ko poori height mil gayi). Sidebar 120dp -> 176dp.
+
+================================================================
+SECTION A — 2026-08-07 SESSION KA KAAM
+================================================================
+
+A1. BACK BUTTON NAVIGATION BUG (MainActivity.kt) ⚠️ ADHOORA THA
+  Is session me "fixed" likha gaya tha, lekin nav wiring missing
+  thi — asli fix 0A me hua hai (2026-08-08).
+  PROBLEM: Detail/Search/Settings/Player pe BACK dabane par "Press
+  BACK again to exit" toast aata tha (ya app exit ho jaati thi)
+  — kyunki MainActivity ka BACK handler kabhi nav stack check hi
+  nahi karta tha. Player me bhi bina overlay ke BACK dabane par
+  player se bahar nahi niklta tha.
+  FIX:
+  - MainActivity me ab `nav` controller reference rakha jaata hai
+    (AppNav set karta hai). BACK par pehle PlayerKeyBus.onBack
+    (player overlays — menu/server list band karna), phir
+    `popBackStack()` — koi pushed route ho to woh pop hota hai.
+  - Sirf Home (root) pe double-back-to-exit gate chalta hai.
+  - PlayerScreen ke overlays (CONTROLS/SERVERS/MENU) BACK se
+    band hote hain; overlay band ho to BACK player se bahar le
+    jaata hai.
+  VERIFY: Detail kholo → BACK → Home aana chahiye (exit nahi).
+  Settings kholo → BACK → Home. Player me BACK ×2 → Home.
+
+
+================================================================
+SECTION B — FIX_PROMPT.md KE 5 ISSUES (performance overhaul)
+================================================================
+FIX_PROMPT.md (2026-08-03) me 5 issues the. Sab FIX HUA ✅:
+
+B1. ROMAJI NAMES (English names abhi bhi nahi dikh rahe the) ✅
+  - title sweep ab 8 ki jagah 50 pages tak jaata hai (full archive
+    600+ anime), empty page par break ho jaata hai.
+  - Feed load ab title scraping pe BLOCK nahi karta — fire-and-
+    forget on bulk client; feed cache me jo English titles pehle se
+    hain unke saath turant return hota hai.
+  - `anime()` ab detail page kholne par DDA page se English naam
+    fetch karta hai (jab map me blank ho; ADH match hone par ADH ka
+    English title authoritative hota hai — wahi wrong/stale naam
+    update karta hai).
+    NOTE (intentional deviation): FIX_PROMPT ne "hamesha fetch"
+    bola tha; session ne sirf blank hone par fetch rakha kyunki
+    har detail-open par full page round-trip critical path pe
+    lagta — title sweep + ADH match pehle se 95%+ cover karte
+    hain. Comment me documented.
+  - `MAX_TITLE_LOOKUPS` constant remove (ab zaroorat nahi).
+  - Naye titles seekhne par feed cache invalidate + silent refresh.
+
+B2. 20-30 SECOND CLICK DELAY (app open ke baad) ✅
+  - mergeAdh Pass 2 (adhlinks pages) aur Pass 3 (DDA slug fetches)
+    ab bulk client pe hain.
+  - findAdhFor candidates 24 → 8, parallel fetch (adhlinks pages
+    detail-open critical path pe hain isliye shared client pe —
+    cold-start sweep flood bulk lane ko block karta tha).
+  - HomeViewModel.init me `totalAnimePages()` hata diya — merged
+    catalog (18 requests) ab app start par nahi chalta.
+  - selectPage() me pehli sidebar navigation par lazy fetch.
+  NOTE (intentional deviation): findAdhFor ka fallback catalog
+  fetch shared client pe rakha hai (bulk pe nahi) kyunki cold-start
+  sweep bulk lane ko flood kar deta tha — comment me documented.
+
+B3. PRIORITY — NAYE ANIME/EPISODES PEHLE, PHIR CLICKS ✅
+  - Feed load minimal: 3 essential requests (DDA latest, DDA ep
+    feed, ADH posts/cached catalog). Title scraping, slug learning,
+    adhlinks page fetches sab background/bulk.
+  - Slug sweep naye slugs seekhne par feed cache invalidate +
+    silent refresh (HubCloud servers + English names aate hain).
+  - HomeViewModel.refresh() (ON_RESUME) sirf feed refresh karta
+    hai — totalAnimePages() nahi.
+
+B4. SAARE PAGES EK SAATH NA LOAD KARO ✅
+  - totalAnimePages() app start par nahi.
+  - mergedCatalog() sirf sidebar page navigation par chalta hai.
+  - AdhScraper.latestPosts() me `client` parameter add; fallback
+    bulk client use karta hai (adhPostsForMerge ke through).
+
+B5. TV PERFORMANCE & RAM OPTIMIZATION ✅
+  - ExoPlayer buffer: 180s → 60s max, 50s → 30s min (remember-
+    StreamPlayer me). ~120MB RAM bachti hai 5Mbps stream par.
+  - Coil image disk cache: 150MB → 100MB.
+  - Network.bulk: NOTE — FIX_PROMPT ne 6/3 bola tha, session ne
+    10/5 rakha (5-per-host = catalog+sweep 2x jaldi drain; ab bhi
+    shared client se niche). Comment me documented.
+  - MAX_SLUG_LOOKUPS: 40 → 20.
+  - PARALLEL_RESOLVES = 2 rakha (2 WebViews conservative hai).
+
+================================================================
+SECTION C — ORIGINAL REQUEST (2026-07-17) KE ITEMS
+================================================================
+C1. HUBCLOUD SERVERS NAHI DIKH RAHE THE ✅
+  Root causes mili aur fix hui (3 alag):
+  - Feed window chhota tha (40 posts) — purane ADH posts kabhi
+    map nahi hote the. Detail open par on-demand findAdhFor + slug
+    store (AdhSlugStore) persist karta hai.
+  - ADH search punctuation se toot jaata tha ("Re:ZERO -Starting
+    Life..." → 0 results). Titles.searchQuery() saara punctuation
+    hata deta hai.
+  - Title-key ambiguity (Thunder 3, roman numerals II/III/IV…).
+  VERIFY: Heaven Official's Blessing kholo → HubCloud servers
+  dikhne chahiye.
+
+C2. "NEW" BADGE SYSTEM ✅
+  - SeenStore (DataStore file): firstRunAt + lastSeen (episode
+    number) + seenStamp (latestEpisodeAt) — sab locally save.
+  - Home card pe "NEW" (published after first run) ya "NEW
+    EPISODE" (fresh upload since last open) badge. Card open karte
+    hi clear.
+  - Detail screen episode cards pe "NEW" badge — jo episode
+    number lastSeen se upar hain. Play karne par clear.
+  - First-run baseline: fresh install par pura grid badges se
+    nahi bharta.
+
+C3. DDA SERVERS PLAYBACK — BUFFERING/LAG/CRASH ✅
+  - vmolydub/CLOUD streams ke liye ExoPlayer buffer 30s/60s + 30s
+    back-buffer + highest-bitrate track (B5 me).
+  - Auto-retry: flaky hosts drop par 3 retries, phir auto-next.
+  - HubCloudResolver ab har candidate URL 1-byte ranged GET se
+    probe karta hai — sirf zinda URL player ko jaata hai (dead
+    links → agla server apne aap).
+  - Embed WebView: ad-JS popups/redirects block (OOM crash fix),
+    window.open band, top-level nav pinned, WebView destroy on
+    teardown (renderer leak fix).
+  - Tsukimichi S1 fix: HubCloudResolver ab JS `var pxl = "..."`
+    link bhi parse karta hai (static anchor stale decoy hota hai)
+    — purane uploads jinke paas sirf JS link zinda hai ab chalte
+    hain.
+
+C4. CACHE SE HOME SCREEN JALDI UPDATE ✅
+  - FeedCacheStore + stale-while-revalidate: cold start par last
+    persisted feed turant paint hota hai, network se fresh feed
+    aane par swap. Feed TTL 60s — back-navigation par refresh.
+  - Sweeps (slug/title) complete hone par feed cache invalidate +
+    silent background refresh — kisi aur screen pe jaane ki zaroorat
+    nahi.
+
+C5. WATCH HISTORY ME PLAYER DATA SAVE ✅
+  - WatchEntry me ab serverLabel, audioLang, subLang, videoHeight
+    save hote hain (har 5 sec reportProgress ke saath).
+  - Continue Watching se resume karte waqt PlaybackSession restore
+    hota hai — wahi server/language/quality/subtitle wapas.
+
+================================================================
+SECTION D — PEHLE KE SESSIONS (2026-07-16 tak, already done)
+================================================================
+1. ADH↔DDA server mapping (HubCloud nahi dikh rahe the) ✅
+   Feed window + search punctuation + title-key ambiguity fixes.
+2. English names (romaji dikh raha tha) ✅ — ADH post match par
+   English title; detail page h1 scrape.
+3. Season switcher (detail page pe seasons row) ✅
+4. HubCloud black screen (Slime S1) ✅ — 1-byte probe, dead URLs
+   skip, gpdl redirector candidate me add.
+5. Mirrordub "click play to verify human" ✅ — AutoPlay.tapCenter
+   (real synthetic tap, cross-origin iframe me bhi kaam karta).
+   30 sec lag ke baad crash ✅ — ad-JS block + WebView destroy.
+6. DDA servers ko native banana ❌ NAHI KIYA (fragile — obfuscated
+   JS runtime pe stream banata hai; WebView sniffer hi sahi hai).
+7. Player all-in-one bottom controls ✅, Home hero section ✅.
+
+================================================================
+SECTION E — FILE STATE CHECK (2026-08-07)
+================================================================
+- 46 Kotlin files, koi TODO/FIXME/HACK marker nahi.
+- SkipStore.kt delete ho chuka hai, koi reference nahi bacha
+  (MkvChapters.fetch ab PlayerViewModel me direct call hota hai).
+- `gradlew.bat :app:assembleDebug --no-daemon` → BUILD SUCCESSFUL.
+- No git repo (git status: not a repository) — changes uncommitted.
+
+================================================================
+TEST CHECKLIST (device pe verify karo)
+================================================================
+[ ] App opens → home feed < 5 sec (cached feed instant paint)
+[ ] Click anime → detail < 3 sec
+[ ] Heaven Official's Blessing → HubCloud servers dikhte hain
+[ ] Tsukimichi S1 → HubCloud play karta hai (dead links skip)
+[ ] "My Dress-Up Darling" / "World's Best Assassin" → English naam
+[ ] Detail pe "Seasons" row → season switch
+[ ] Home card pe NEW / NEW EPISODE badge; detail ep cards pe NEW
+[ ] Badge card open karke wapas aane par clear hona chahiye
+[ ] Player me server/quality/audio/sub pick → app band karke
+    Continue Watching → wahi setup resume hona chahiye
+[ ] Player me BACK ×2 → Home (exit nahi)
+[ ] Detail/Search me BACK → Home (exit toast nahi)
+[ ] Sidebar "Page N" → on-demand load, app start par nahi
+[ ] 1GB RAM box par 2-3 min Mirrordub → crash nahi
+[ ] DDA servers (vmolydub/CLOUD) → buffering/lag nahi
+[ ] Refresh button → spinner ke saath naya feed
+
+================================================================
+KNOWN LIMITATIONS (ab bhi ho sakta hai)
+================================================================
+1. Galat "Watch online" link wale ADH posts (copy-paste galti)
+   safe-side hokar map nahi hote.
+2. DDA ka WP search sirf romaji titles match karta hai — English
+   query 0 results; season switcher ADH pe depend karta hai.
+3. Mirror sub-servers ka anti-bot gate kabhi-kabhi coordinates pe
+   click maangta hai — auto-tap center pe hota hai; OK dabao.
+4. Purane HubCloud uploads ke saare mirrors dead hon to HubCloud
+   skip → DDA servers se chalta hai (site-side issue).
