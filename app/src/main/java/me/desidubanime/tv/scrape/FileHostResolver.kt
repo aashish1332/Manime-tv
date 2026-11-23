@@ -100,6 +100,9 @@ object FileHostResolver {
         "workers.dev", "r2.dev", "cloudflarestorage", "backblazeb2", "b-cdn.net",
         "digitaloceanspaces", "storage.googleapis", "amazonaws", "/api/file/",
         "pixeldrain", "gpdl", "pixel.", "fsl", "gdflix.", "driveleech", "drivebot", "busycdn.xyz", "fpgo.xyz", "dotflix", "googleusercontent",
+        // Verified live 2026-11: the CDN hosts these backends actually hand out.
+        "instadl.rest", "fastdl-one.pages.dev", "busycdn.instadl", "bhfastdrive",
+        "filepress.lat", "filebee.live", "dotflix.shop",
         "filepress", "fpgo", "filebee", "filepress.baby", "filemoon", "streamwish", "doodstream",
         "blogspot.com", "googlevideo", "ggpht", "bzzhr",
     )
@@ -187,19 +190,33 @@ object FileHostResolver {
         // One plain GET, no browser, no crawl — try it before anything else.
         // (Only fires when the page actually carries that shape; harmless for
         // every other host.)
+        //
+        // That JSON is ONE plain GET away — no ad to watch, no QR to scan
+        // (verified live against archive.toonworld4all.me).
+        //
+        // The card's printed label is NOT the authority: T4A prints "GDFlix"
+        // on a row whose token may point anywhere. So the resolved URL is
+        // re-submitted through this same entry point with the hoster derived
+        // from THAT url, which routes it to the right dedicated resolver.
+        // That re-dispatch is what removes the QR requirement: before it, the
+        // token was only probed once and, when the guess wasn't directly
+        // playable, control fell into the browser flow — the ad/QR wall.
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
-            resolveRedirectProps(pageUrl)?.let { stream ->
-                // The guessed URL is often DEAD (T4A's hidden ids are minted
-                // per-browser-session), so a failure here must FALL THROUGH
-                // to the browser flow below — returning would abandon every
-                // remaining strategy.
-                if (servesMedia(stream)) {
-                    DebugLog.log("resolve", "redirect __PROPS__ OK -> ${short(stream.url)}")
-                    DebugLog.log("resolve", "Stream headers: ${stream.headers}")
-                    return@withContext stream
+            val target = redirectTargetOf(pageUrl)
+            if (target != null && !target.contains("/redirect/", ignoreCase = true)) {
+                DebugLog.log("resolve", "redirect -> ${short(target)} (direct, no ad/QR)")
+                resolve(target, hosterFromUrl(target, hoster), budgetMs, browser)?.let {
+                    DebugLog.log("resolve", "redirect resolved -> ${short(it.url)}")
+                    return@withContext it
                 }
-                DebugLog.log("resolve", "redirect __PROPS__ target dead (${short(stream.url)}), falling through")
-            } ?: DebugLog.log("resolve", "redirect __PROPS__ empty, falling through to generic crawl")
+                // A generic pass over the REAL page still beats an ad wall.
+                // Plain HTTP only: the browser hop here IS the QR flow, and it
+                // must never be reached implicitly.
+                crawl(target, deadline, browser = null)?.let { return@withContext it }
+                DebugLog.log("resolve", "redirect target unresolved -> ${short(target)}")
+                return@withContext null
+            }
+            DebugLog.log("resolve", "redirect __PROPS__ empty, falling through to generic crawl")
         }
         if (hoster.equals("HubCloud", ignoreCase = true)) {
             runCatching { HubCloudResolver.resolve(pageUrl) }.getOrNull()?.let {
@@ -223,6 +240,17 @@ object FileHostResolver {
             }
         }
         if (hoster.contains("gdflix", ignoreCase = true)) {
+            // NEWEST PROTOCOL FIRST (verified live 2026-11): gdflix.dev answers
+            // plain HTTP with NO Cloudflare challenge (302 -> newN.gdflix.io,
+            // 200 + 43KB of HTML). The page's own "instant" button POSTs
+            //   action=instant + key + action_token  to  <host>/mfile/<id>
+            // and the JSON answer carries the final CDN URL. Two requests, no
+            // browser, no challenge — the legacy multi-step crawl below stays
+            // only as a fallback for older/odd uploads.
+            kotlinx.coroutines.withTimeoutOrNull(20_000L) { gdflixInstant(pageUrl) }?.let {
+                DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
+                return@withContext it
+            }
             try {
                 // Try plain-HTTP with longer timeout; sometimes Cloudflare takes a moment
                 kotlinx.coroutines.withTimeoutOrNull(30_000L) { gdflixPlainHttp(pageUrl) }?.let {
@@ -292,6 +320,13 @@ object FileHostResolver {
                 }
             }
             // Now try to resolve the filepress link (either the original if it's already filepress, or the extracted one)
+            // CURRENT protocol first (verified live): the domain's own
+            // `/api` proxy, no Cloudflare. The old api.filebee.xyz call below
+            // is kept only as a fallback for anything that still answers it.
+            kotlinx.coroutines.withTimeoutOrNull(20_000L) { filepressApi(pageUrl) }?.let {
+                DebugLog.log("resolve", "FilePress API OK -> ${short(it.url)}")
+                return@withContext it
+            }
             kotlinx.coroutines.withTimeoutOrNull(25_000L) { filebeePlainHttp(filepressPageUrl) }?.let {
                 DebugLog.log("resolve", "FileBee API OK -> ${short(it.url)}")
                 return@withContext it
@@ -834,6 +869,75 @@ object FileHostResolver {
     }
 
     /**
+     * The REAL file-host URL behind a T4A `/redirect/<token>` interstitial.
+     *
+     * One plain GET returns the page's own props (verified live):
+     *   window.__PROPS__ = {"userSystem":"24hour",
+     *                       "destination":"https://shrinkme.click/…",  <- the ad
+     *                       "link":{"domain":"https://gdflix.dev/file/",
+     *                               "hidden":"12n00zvrf7ek31m"},"total":4}
+     * `destination` is the ad-shortener the site WANTS you to open; `link` is
+     * the hoster path the file actually lives behind. Joining the two needs no
+     * ad view, no QR scan and no browser.
+     */
+    private fun redirectTargetOf(pageUrl: String): String? {
+        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS) ?: return null
+        // The props are a single line of JSON on the interstitial page.
+        val props = Regex("""window\.__PROPS__\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL)
+            .find(html)?.groupValues?.get(1)
+        val linkObj = Regex(""""link"\s*:\s*(\{[^{}]*\})"""").find(props ?: html)?.groupValues?.get(1)
+            ?: return null
+        val domain = Regex(""""domain"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
+        val hidden = Regex(""""hidden"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
+        if (!domain.startsWith("http") || hidden.isBlank()) return null
+        return domain.trimEnd('/') + "/" + hidden.removePrefix("/")
+    }
+
+    /**
+     * Which dedicated resolver a URL deserves. Deliberately derived from the
+     * RESOLVED url, not from the label the site printed on its card — T4A and
+     * the ADH mirrors both mislabel rows, and a token can point anywhere.
+     */
+    private fun hosterFromUrl(url: String, fallback: String): String {
+        val u = url.lowercase()
+        return when {
+            u.contains("gdflix") -> "GDFlix"
+            u.contains("filepress") || u.contains("filebee") || u.contains("fpgo.") -> "FilePress"
+            u.contains("hubcloud") -> "HubCloud"
+            u.contains("dotflix") -> "GDFlix"
+            u.contains("pixeldrain") -> "PixelDrain"
+            u.contains("driveleech") -> "DriveLeech"
+            u.contains("drivebot") -> "DriveBot"
+            else -> fallback
+        }
+    }
+
+    /**
+     * GET that also reports where it LANDED. Several hosts (gdflix.dev,
+     * filebee.live, fpgo.xyz) are aliases that 302 to a numbered domain, and
+     * the follow-up API only exists on that final origin — so the final URL is
+     * part of the answer, not a detail.
+     */
+    private fun fetchFollowing(url: String): Pair<String, String>? = try {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", Api.USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml,*/*")
+            .build()
+        probeClient.newCall(req).execute().use { resp ->
+            val finalUrl = resp.request.url.toString()
+            val body = if (resp.isSuccessful) readCapped(resp) else null
+            if (body == null) {
+                DebugLog.log("http", "follow ${resp.code} ${short(url)}")
+                null
+            } else finalUrl to body
+        }
+    } catch (e: Exception) {
+        DebugLog.log("http", "follow failed ${e.javaClass.simpleName}: ${e.message} ${short(url)}")
+        null
+    }
+
+    /**
      * One plain GET against a /redirect/ token page; when its HTML embeds
      * `window.__PROPS__ = {…"link":{"domain":D,"hidden":H}}`, D+H is the real
      * drive URL. The sibling "destination" field is an AD SHORTENER
@@ -1280,6 +1384,248 @@ object FileHostResolver {
     /** Below this there isn't time for a browser hop to finish — don't start one. */
     private const val MIN_BROWSER_MS = 6_000L
 
+    /**
+     * GDFlix's CURRENT plain-HTTP flow — two requests, no browser, no
+     * challenge. Verified live 2026-11 against a real upload:
+     *
+     *   gdflix.dev/file/<id>              302 -> newN.gdflix.io/file/<id>   200
+     *   page JS: formData.append("key","<40 hex>") and, for its "instant"
+     *            button, taskaction() POSTs to the SAME path with 'file'
+     *            swapped for 'mfile'.
+     *   POST <host>/mfile/<id>  action=instant & key & action_token=""
+     *        header x-token: <host>
+     *     -> {"error":false,"info":"Success","url":"https://video-downloads…"}
+     *
+     * That url answers 206 with Content-Type video/mkv and the full byte count,
+     * i.e. it is the file itself. The site ALSO prints a ready CDN anchor
+     * (busycdn…?bytes=97312424) but it 302s into a shortener page, so the API
+     * above is the short path.
+     *
+     * "action=direct" / "original" are the page's other two buttons; they
+     * answer {"error":true,"message":"Direct Download not Enabled!"} on files
+     * that don't offer them, which is why they are only tried afterwards.
+     */
+    private suspend fun gdflixInstant(pageUrl: String): Playable.Stream? = withContext(Dispatchers.IO) {
+        val fetched = fetchFollowing(pageUrl) ?: return@withContext null
+        val (finalUrl, html) = fetched
+        if (looksLikeChallenge(html)) {
+            DebugLog.log("gdflix", "challenge on ${short(finalUrl)}")
+            return@withContext null
+        }
+        // Key is double-quoted inside formData.append — a page without it is
+        // the site's generic shell (file removed), so bail early.
+        val key = Regex("""formData\.append\(\s*"key"\s*,\s*"([A-Fa-f0-9]{16,})"\s*\)""")
+            .find(html)?.groupValues?.get(1)
+            ?: Regex(""""key"\s*,\s*"([A-Fa-f0-9]{16,})"""").find(html)?.groupValues?.get(1)
+            ?: run {
+                DebugLog.log("gdflix", "no key on page (${html.length}b) — likely removed upload")
+                null
+            }
+            ?: return@withContext null
+        val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: return@withContext null
+        val tokenHost = host.removePrefix("https://").removePrefix("http://")
+        val mPath = if (finalUrl.contains("/file/")) finalUrl.replace("/file/", "/mfile/") else finalUrl
+        for ((action, target) in listOf("instant" to mPath, "direct" to finalUrl, "original" to finalUrl)) {
+            val body = okhttp3.FormBody.Builder()
+                .add("action", action)
+                .add("key", key)
+                .add("action_token", "")
+                .build()
+            val req = Request.Builder()
+                .url(target)
+                .post(body)
+                .header("x-token", tokenHost)
+                .header("Referer", finalUrl)
+                .build()
+            val json = runCatching { probeClient.newCall(req).execute().use { readCapped(it) } }.getOrNull()
+                ?: continue
+            val raw = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
+                ?: Regex(""""visit_url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
+            if (raw == null) {
+                DebugLog.log("gdflix", "$action: ${json.replace(Regex("\\s+"), " ").take(150)}")
+                continue
+            }
+            val url = raw.replace("\\/", "/")
+            if (!url.startsWith("http")) continue
+            DebugLog.log("gdflix", "$action -> ${short(url)}")
+            when (verdictOf(url, browser = null, method = "GET", ranged = true)) {
+                Verdict.FILE -> return@withContext stream(url, null)
+                // A PAGE answer means the mint returned a shortener/interstitial;
+                // one cheap crawl still beats failing the server outright.
+                Verdict.PAGE -> crawl(url, System.currentTimeMillis() + GDFLIX_CRAWL_MS, null)
+                    ?.let { return@withContext it }
+                else -> Unit
+            }
+        }
+        null
+    }
+
+    /**
+     * FilePress / FileBee (filebee.live, fpgo.xyz, newN.filepress.lat) — CURRENT
+     * protocol, reverse-engineered from the live SPA and verified with real
+     * links (filebee.live/file/… for Blue Box S2E06, 184 MB):
+     *
+     *   GET  {origin}/api/file/get/<slug>
+     *     -> {"data":{"_id":…,"downloadOptions":{…},"size":…}}
+     *   POST {origin}/api/file/downlaod/   {captchaValue:null,id:_id,method:…}
+     *     -> {"data":"https://…"}                 ready link  (dotFlix)
+     *     -> {"data":"<24-hex job id>"}            async job  (public/index/gpixel)
+     *     -> CHALLENGE_REQUIRED / LOGIN_REQUIRED   browser or account only
+     *
+     * THE `/api` PREFIX IS THE WHOLE FIX. The SPA is served from the domain's
+     * own origin, which proxies the backend (`REACT_APP_BACKEND_DOMAIN:"/api"`).
+     * The old code called https://api.filebee.xyz directly — that host sits
+     * behind a Cloudflare JS challenge ("Just a moment…", verified live) and
+     * answered every request with an HTML wall, so FilePress never resolved
+     * even though its page loads fine over plain HTTP.
+     *
+     * Note the backend's own spelling: "downlaod".
+     */
+    private suspend fun filepressApi(pageUrl: String): Playable.Stream? = withContext(Dispatchers.IO) {
+        val slug = pageUrl.substringBefore('?').trimEnd('/').substringAfterLast('/')
+        if (slug.isBlank() || slug.length < 6) return@withContext null
+        // filebee.live / fpgo.xyz are ALIASES: the page 302s to
+        // newN.filepress.lat, and `/api` only exists on that final origin.
+        val fetched = fetchFollowing(pageUrl) ?: return@withContext null
+        val origin = Regex("""^(https?://[^/]+)""").find(fetched.first)?.groupValues?.get(1)
+            ?: return@withContext null
+        if (looksLikeChallenge(fetched.second)) return@withContext null
+        val api = "$origin/api"
+        val info = runCatching {
+            probeClient.newCall(
+                Request.Builder().url("$api/file/get/$slug")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Referer", "$origin/")
+                    .build(),
+            ).execute().use { readCapped(it) }
+        }.getOrNull() ?: return@withContext null
+        if (!info.trimStart().startsWith("{")) {
+            DebugLog.log("filepress", "get blocked (${info.length}b) ${short(origin)}")
+            return@withContext null
+        }
+        val fileId = Regex(""""_id"\s*:\s*"([A-Za-z0-9_-]{6,40})"""").find(info)?.groupValues?.get(1) ?: slug
+        val opts = Regex(""""downloadOptions"\s*:\s*\{([^}]*)\}"""").find(info)?.groupValues?.get(1).orEmpty()
+        val enabled = Regex(""""?([A-Za-z]+)"?\s*:\s*true"""").findAll(opts).map { it.groupValues[1] }.toSet()
+        // `downloadOptions` describes the buttons the SITE chooses to show, not
+        // what the backend accepts: a file advertising only telegram/index still
+        // answered `publicDownlaod` with a working Drive id (verified live). So
+        // the flags only ORDER the attempts — they never remove one.
+        val methods = FILEPRESS_METHODS.sortedBy { if (it in enabled) 0 else 1 }
+        DebugLog.log("filepress", "id=$fileId opts=$enabled ${short(origin)}")
+        for (method in methods) {
+            // Stage 1 — the delivery job. Answers either a ready URL (dotFlix)
+            // or {"data":"<24-hex job id>"}.
+            val first = filepressPost("$api/file/downlaod/", fileId, method, origin) ?: continue
+            DebugLog.log("filepress", "$method -> ${first.replace(Regex("\\s+"), " ").take(140)}")
+            for (url in candidateUrlsIn(first)) {
+                if (probe(url, null, System.currentTimeMillis() + PROBE_DEADLINE_MS) == Verdict.FILE) {
+                    return@withContext stream(url, null)
+                }
+            }
+            val jobId = Regex(""""data"\s*:\s*"([A-Za-z0-9]{16,40})"""").find(first)?.groupValues?.get(1)
+                ?: continue
+            // Stage 2 — poll the job on `/downlaod2/` (the SPA's
+            // `usesDownloadV2` endpoint). Verified live: this answers
+            // {"data":"<33-char Google Drive file id>"}, which is the piece the
+            // old code never reached, and why FilePress always failed.
+            val second = filepressPost("$api/file/downlaod2/", jobId, method, origin) ?: continue
+            DebugLog.log("filepress", "$method v2 -> ${second.replace(Regex("\\s+"), " ").take(140)}")
+            for (url in candidateUrlsIn(second)) {
+                if (probe(url, null, System.currentTimeMillis() + PROBE_DEADLINE_MS) == Verdict.FILE) {
+                    return@withContext stream(url, null)
+                }
+            }
+            Regex(""""data"\s*:\s*"([A-Za-z0-9_-]{20,60})"""").find(second)?.groupValues?.get(1)?.let { id ->
+                resolveDriveFile(id)?.let { return@withContext it }
+            }
+        }
+        null
+    }
+
+    /**
+     * Google Drive delivery, as FilePress uses it. Verified live against a real
+     * 184,854,656-byte upload (`206`, Content-Range total matching the file):
+     *
+     *   GET download?id=<id>&authuser=0
+     *     small files  -> the bytes themselves
+     *     large files  -> a ~2.5 KB confirmation page whose form carries
+     *                      id/authuser/confirm=t/uuid
+     *   GET …&export=download&confirm=t&uuid=<uuid>   -> the bytes
+     *
+     * The uuid is minted per session, so it MUST be read from that page rather
+     * than reused; the cookie jar keeps whatever Drive set on the first hop.
+     */
+    private suspend fun resolveDriveFile(driveId: String): Playable.Stream? = withContext(Dispatchers.IO) {
+        val base = "https://drive.usercontent.google.com/download?id=$driveId&authuser=0"
+        if (probe(base, null, System.currentTimeMillis() + PROBE_DEADLINE_MS) == Verdict.FILE) {
+            return@withContext stream(base, null)
+        }
+        val page = get(base, System.currentTimeMillis() + DRIVE_BUDGET_MS) ?: return@withContext null
+        val uuid = Regex("""name="uuid"\s+value="([^"]+)"""").find(page)?.groupValues?.get(1)
+        val confirm = "$base&export=download&confirm=t" + (uuid?.let { "&uuid=$it" } ?: "")
+        if (probe(confirm, null, System.currentTimeMillis() + PROBE_DEADLINE_MS) == Verdict.FILE) {
+            DebugLog.log("drive", "confirmed -> ${short(driveId)}")
+            return@withContext stream(confirm, null)
+        }
+        DebugLog.log("drive", "no bytes for ${short(driveId)} (uuid=${uuid != null})")
+        null
+    }
+
+    private fun filepressPost(url: String, id: String, method: String, origin: String): String? = try {
+        val json = """{"captchaValue":null,"id":"$id","method":"$method"}"""
+        probeClient.newCall(
+            Request.Builder().url(url)
+                .post(okhttp3.RequestBody.create("application/json".toMediaTypeOrNull(), json))
+                .header("Content-Type", "application/json")
+                .header("Origin", origin)
+                .header("Referer", "$origin/")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build(),
+        ).execute().use { readCapped(it) }
+    } catch (e: Exception) {
+        DebugLog.log("filepress", "post failed ${e.javaClass.simpleName}")
+        null
+    }
+
+    /**
+     * Every ready-made delivery URL in a FilePress answer.
+     *
+     * Three shapes were observed live, and the third is easy to miss:
+     *   {"data":"https://…"}                       single link   (dotFlix)
+     *   {"url":"https://…"} / {"downloadUrl":"…"}  named field
+     *   {"data":["https://…","https://…"]}        url-list      (indexDownlaod)
+     * The list form is why matching `"data":"https…` literally missed the only
+     * usable answer index delivery ever returned.
+     */
+    private fun candidateUrlsIn(json: String): List<String> =
+        Regex(""""https?:\\?/\\?/[^"\s\\]+"""")
+            .findAll(json)
+            .map { it.value.replace("\\/", "/") }
+            .filter { it.length in 12..2_000 }
+            .filter { !it.contains("googleusercontent.com/…") }
+            .distinct()
+            .toList()
+
+    /**
+     * FilePress delivery methods, most-direct first. `dotFlixDownlaod` is the
+     * one that answers a bare URL today (label "Instant Download"); the rest
+     * are async jobs or gated, and are tried only because availability varies
+     * per file (`downloadOptions` decides which are even attempted).
+     */
+    private val FILEPRESS_METHODS = listOf(
+        // Proven end to end (live): job id -> /downlaod2/ -> Drive file id ->
+        // confirmed 206 with the real byte count. Kept first on purpose.
+        "publicDownlaod",
+        "dotFlixDownlaod",
+        "cloudR2Downlaod",
+        "indexDownlaod",
+        "gpixelFastDownload",
+        "publicUserDownlaod",
+    )
+
+    /** Budget for one crawl of a minted gdflix link. */
+    private const val GDFLIX_CRAWL_MS = 12_000L
+
     /** FileBee delivery methods that return a direct URL without captcha. */
     private val FILEBEE_METHODS = listOf(
         "gpDirectDownlaod",      // google-drive-style direct file
@@ -1307,4 +1653,10 @@ object FileHostResolver {
 
     /** Cap for the single confirmation probe after __PROPS__ resolution. */
     private const val PROBE_DEADLINE_MS = 8_000L
+
+    /** One plain GET of a T4A /redirect/ interstitial must never hang a resolve. */
+    private const val REDIRECT_BUDGET_MS = 12_000L
+
+    /** Reading Drive's confirmation page (one small HTML GET). */
+    private const val DRIVE_BUDGET_MS = 10_000L
 }

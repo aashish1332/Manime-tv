@@ -9,6 +9,66 @@ APK: app/build/outputs/apk/debug/app-debug.apk
   Build command: gradlew.bat :app:assembleDebug --no-daemon
 
 ================================================================
+SECTION 00000 — 2026-11-23 SESSION #5 (live-verified)
+================================================================
+User: GDFlix/FilePress servers kaam nahi kar rahe; ToonWorld4All
+ads/QR ke bina chalna chahiye. Sab kuch ASLI sites pe live check
+kiya gaya (koi assumption nahi).
+
+00000A. GDFLIX — PURANA RAASTA HI GALAT THA ✅
+  Live: gdflix.dev/file/<id> ab 403/Cloudflare NAHI deta — 302 se
+  new10.gdflix.io par 200 + ~43KB HTML aata hai. Matlab browser /
+  CF-challenge wala pura theory ab outdated hai.
+  NAYA PROTOCOL (2 request, no browser):
+    page me `formData.append("key", "<40hex>")` hota hai
+    POST <host>/mfile/<id>  action=instant + key + action_token=""
+         header x-token: <host>
+      -> {"error":false,"url":"https://video-downloads…"}
+  VERIFIED: us URL par ranged GET = 200, Content-Type video/mkv,
+  Content-Length 97312424 (asli file). "action=direct" wala purana
+  POST ab {"error":true,"message":"Direct Download not Enabled!"}
+  deta hai — isliye pehle instant, phir direct/original.
+
+00000B. FILEPRESS — ASLI KARAN: GALAT API HOST ✅
+  Live: api.filebee.xyz par Cloudflare JS challenge ("Just a
+  moment…") hai — plain OkHttp kabhi paar nahi kar sakta. Isi
+  liye page khulta tha par resolve kabhi nahi hota tha.
+  SPA apne hi origin ka `/api` proxy use karta hai
+  (REACT_APP_BACKEND_DOMAIN="/api") — wahan CF bilkul nahi hai.
+  NAYA PROTOCOL (verified end-to-end, 184MB file):
+    GET  {origin}/api/file/get/<slug>        -> data._id, downloadOptions
+    POST {origin}/api/file/downlaod/         {captchaValue:null,id,_method}
+    POST {origin}/api/file/downlaod2/        (job id)  -> 33-char Drive id
+    GET  drive.usercontent.google.com/download?id=<id>&authuser=0
+         -> 2.5KB confirm page (id/confirm=t/uuid)
+    GET  …&export=download&confirm=t&uuid=<uuid>
+         -> 206, Content-Range bytes 0-1/184854656, sahi filename
+  NOTE: backend me spelling "downlaod" hi hai. downloadOptions sirf
+  buttons batata hai — flags se method HATAO mat, sirf order do
+  (publicDownlaod unlisted hone par bhi chala).
+
+00000C. TOONWORLD4ALL — ADS/QR KE BINA ✅
+  Live: archive.toonworld4all.me/redirect/<token> me seedha
+    window.__PROPS__ = {"destination":"https://shrinkme.click/…",
+                        "link":{"domain":"https://gdflix.dev/file/",
+                                "hidden":"<id>"},"total":4}
+  `destination` = ad; `link` = asli hoster. Ek plain GET me milta
+  hai — na ad dekhna, na QR scan.
+  FIX: /redirect/ token ab pehle RESOLVE hota hai, phir us RESOLVED
+  url ke hoster se dobara dispatch (gdflix/filepress/hubcloud).
+  Pehle sirf probe hota tha aur fail hone par browser flow (=QR
+  wall) chalta tha. Saath me PlayerViewModel ka "TW hai to seedha
+  QR kholo" early-return hata diya — ab pehle plain HTTP try hota
+  hai, QR sirf last resort.
+
+BACHA HUA / DHYAN DENE LAYAK
+  - adb is machine pe nahi hai -> UI runtime verify nahi hua.
+  - Network-level sab live verify hua (upar ke teeno 206/200
+    responses asli files ke saath).
+  - Purane T4A/ADH uploads ke hosters dead ho sakte hain (Blue Box
+    S2E1 ka gdflix page generic shell deta hai, filepress "Invaild
+    File ID") — us case me sahi behaviour hai: agla server.
+================================================================
 SECTION 0000 — 2026-08-08 SESSION #4
 ================================================================
 User: "badges ek saath appear hone chahiye — Slime S4 pe pehle AD

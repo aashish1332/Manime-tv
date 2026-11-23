@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
@@ -81,6 +82,37 @@ fun PlayerScreen(
     var overlay by remember { mutableStateOf(Overlay.NONE) }
     var showSeekHud by remember { mutableStateOf(false) }
     var seekHudTick by remember { mutableIntStateOf(0) }
+    // A remote sends a burst of ◀/▶ repeats. The seeks are accumulated and one
+    // lands after the burst, so the badge — not the play head — shows where the
+    // picture is about to go.
+    var seekDelta by remember { mutableStateOf(0L) }
+    var seekTarget by remember { mutableStateOf(0L) }
+    var seekJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // INFO (or the menu) toggles VLC's stats pane.
+    var statsOpen by remember { mutableStateOf(false) }
+    // Non-null -> the failure card owns the screen: Retry / Choose server / Close.
+    var playError by remember { mutableStateOf<String?>(null) }
+    var resizeMode by remember { mutableIntStateOf(0) }
+    var subScale by remember { mutableStateOf(1f) }
+    var fpsCap by remember { mutableStateOf("auto") }
+    // The PlayerView is created inside an AndroidView, so the picture-size,
+    // subtitle and frame-rate settings need a live handle on it.
+    val playerView = remember { mutableStateOf<androidx.media3.ui.PlayerView?>(null) }
+    // Bumped when a local subtitle file is rewritten (the ±0.1 s delay).
+    // ExoPlayer parses a subtitle file once and keeps the cues, so editing the
+    // file in place is invisible until the player is rebuilt — without this the
+    // delay buttons would look like dead controls.
+    var subGen by remember { mutableIntStateOf(0) }
+
+
+    // Player preferences live in DataStore; read them once per session so the
+    // first frame already has the picture size and subtitle scale the viewer
+    // chose last time.
+    LaunchedEffect(Unit) {
+        resizeMode = ServiceLocator.settings.resizeMode()
+        subScale = ServiceLocator.settings.subtitleScale()
+        fpsCap = ServiceLocator.settings.maxFps()
+    }
     var showHint by remember { mutableStateOf(true) }
     // Binge flow: when an episode ends, offer the next one for a few seconds
     // instead of jumping under the viewer's hands. OK plays now, BACK cancels.
@@ -134,6 +166,7 @@ fun PlayerScreen(
     val stream = state.playable as? Playable.Stream
     val exo = rememberStreamPlayer(
         stream = stream,
+        subGen = subGen,
         // Read the CURRENT state instead of a captured one: this listener is
         // installed once per player, so a captured `state` would be the one
         // from the moment the stream opened.
@@ -149,7 +182,10 @@ fun PlayerScreen(
         // no explanation and no way forward except BACK.
         onDead = { code ->
             vm.reportPlaybackFailure(code)
-            overlay = Overlay.SERVERS
+            // A card, not a silent jump to the server list: "it did not play"
+            // has three answers (retry, another server, leave) and the viewer
+            // is the one who knows which is right.
+            playError = code
         },
     )
     val rootFocus = remember { FocusRequester() }
@@ -194,6 +230,18 @@ fun PlayerScreen(
         }
     }
 
+    // Losing the foreground (HOME, another app) must stop the audio: a box that
+    // keeps playing under the launcher reads as "the app is broken", and on a
+    // shared TV it is worse than that.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exo) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) exo?.pause()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // The 5s ticker writes through the ViewModel scope, which is cancelled the
     // moment this screen pops. Leaving the player is the last chance to persist
     // the exact position, so that one write runs on its own IO scope.
@@ -207,10 +255,26 @@ fun PlayerScreen(
         }
     }
 
+    /**
+     * Accumulates seek presses and lands ONE seek 350 ms after the last one.
+     *
+     * Seeking on every key repeat made the host chase a moving byte offset
+     * (visible as a stutter on a slow file host) and the play head could never
+     * show where a burst was heading. The badge shows the target immediately.
+     */
     fun seekBy(deltaMs: Long) {
         val p = exo ?: return
         val dur = p.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        p.seekTo((p.currentPosition + deltaMs).coerceIn(0L, dur))
+        val base = if (seekDelta == 0L) p.currentPosition else seekTarget
+        val target = (base + deltaMs).coerceIn(0L, dur)
+        seekTarget = target
+        seekDelta = target - p.currentPosition
+        seekJob?.cancel()
+        seekJob = coroutineScope.launch {
+            delay(350)
+            p.seekTo(target)
+            seekDelta = 0L
+        }
         showSeekHud = true
         seekHudTick++
     }
@@ -223,6 +287,9 @@ fun PlayerScreen(
             .focusable()
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // The failure card's buttons own the remote: OK and the D-pad
+                // must reach them, so transport handling stands down.
+                if (playError != null) return@onPreviewKeyEvent false
                 if (overlay != Overlay.NONE) {
                     // Overlays own the d-pad; BACK closes them (also covered by PlayerKeyBus).
                     return@onPreviewKeyEvent if (e.key == Key.Back) {
@@ -245,21 +312,51 @@ fun PlayerScreen(
                             embedWebView.value?.let { StreamResolver.AutoPlay.tapCenter(it); true } ?: false
                         }
                     Key.DirectionUp -> { overlay = Overlay.SERVERS; true }
-                    Key.DirectionLeft, Key.MediaRewind ->
-                        if (exo != null) { seekBy(-10_000); true } else false
-                    Key.DirectionRight, Key.MediaFastForward ->
-                        if (exo != null) { seekBy(10_000); true } else false
+                    Key.DirectionLeft, Key.MediaRewind -> {
+                        if (exo == null) {
+                            false
+                        } else {
+                            // A media key is a full minute, the D-pad is a
+                            // quick ±10s hop. (The timeline's own ±10% step is
+                            // handled by the timeline, which owns focus.)
+                            val step = if (e.key == Key.MediaRewind) 60_000L else 10_000L
+                            seekBy(-step)
+                            true
+                        }
+                    }
+                    Key.DirectionRight, Key.MediaFastForward -> {
+                        if (exo == null) {
+                            false
+                        } else {
+                            val step = if (e.key == Key.MediaFastForward) 60_000L else 10_000L
+                            seekBy(step)
+                            true
+                        }
+                    }
                     Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.Spacebar ->
                         if (exo != null) { exo.playWhenReady = !exo.playWhenReady; true } else false
                     Key.MediaNext -> if (state.hasNext) { vm.next(); true } else false
-                    Key.MediaPrevious -> if (state.hasPrev) { vm.previous(); true } else false
+                    // Media convention: PREVIOUS restarts the current episode
+                    // unless it has only just started, then it steps back.
+                    Key.MediaPrevious -> when {
+                        exo == null && !state.hasPrev -> false
+                        exo != null && (exo.currentPosition > 5_000 || !state.hasPrev) -> {
+                            exo.seekTo(0)
+                            true
+                        }
+                        else -> { vm.previous(); true }
+                    }
+                    // STOP is "leave the player" on a TV remote, not "pause".
+                    Key.MediaStop -> { onBack(); true }
+                    // INFO opens the stats pane, exactly like VLC's info window.
+                    Key.Info -> { statsOpen = !statsOpen; true }
                     Key.Menu -> { overlay = Overlay.MENU; true }
                     else -> false
                 }
             },
     ) {
         when (val p = state.playable) {
-            is Playable.Stream -> if (exo != null) NativePlayerView(exo)
+            is Playable.Stream -> if (exo != null) NativePlayerView(exo) { playerView.value = it }
             is Playable.Embed -> EmbedPlayer(p.url, onWebView = { embedWebView.value = it })
             null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
@@ -302,8 +399,43 @@ fun PlayerScreen(
             SeekHud(
                 exo = exo,
                 tick = seekHudTick,
+                deltaMs = seekDelta,
+                targetMs = seekTarget,
                 onHide = { showSeekHud = false },
                 modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
+
+        // The PlayerView is rebuilt on every server switch, so the picture-size,
+        // subtitle size and frame-rate hint are re-applied whenever any of them
+        // (or the view itself) changes.
+        LaunchedEffect(playerView.value, resizeMode, subScale, fpsCap) {
+            val v = playerView.value ?: return@LaunchedEffect
+            applyResizeMode(v, resizeMode)
+            applySubtitleStyle(v, subScale)
+            applyFrameRateCap(v, fpsCap)
+        }
+
+        if (statsOpen && exo != null) {
+            StatsOverlay(
+                stats = rememberPlayerStats(exo),
+                resizeMode = resizeMode,
+                serverLabel = state.selected?.label.orEmpty(),
+                modifier = Modifier.align(Alignment.TopStart).padding(24.dp),
+            )
+        }
+
+        playError?.let { code ->
+            PlaybackErrorCard(
+                message = code,
+                onRetry = {
+                    playError = null
+                    state.selected?.let { opt ->
+                        vm.selectOption(opt, exo?.currentPosition ?: 0L)
+                    }
+                },
+                onChooseServer = { playError = null; overlay = Overlay.SERVERS },
+                onClose = { playError = null; onBack() },
             )
         }
 
@@ -332,6 +464,35 @@ fun PlayerScreen(
                 onNext = { vm.next(); overlay = Overlay.NONE },
                 onPrev = { vm.previous(); overlay = Overlay.NONE },
                 onClose = { overlay = Overlay.NONE },
+                onJumpTo = { i -> vm.start(i); overlay = Overlay.NONE },
+                resizeMode = resizeMode,
+                onResize = { mode ->
+                    resizeMode = mode
+                    coroutineScope.launch { ServiceLocator.settings.setResizeMode(mode) }
+                },
+                subScale = subScale,
+                onSubScale = { scale ->
+                    subScale = scale
+                    coroutineScope.launch { ServiceLocator.settings.setSubtitleScale(scale) }
+                },
+                fpsCap = fpsCap,
+                onFpsCap = { cap ->
+                    fpsCap = cap
+                    coroutineScope.launch { ServiceLocator.settings.setMaxFps(cap) }
+                },
+                statsOpen = statsOpen,
+                onToggleStats = { statsOpen = !statsOpen },
+                stream = state.playable as? Playable.Stream,
+                onAddSubtitle = { track ->
+                    // Park the position first: the rebuilt player resumes from it.
+                    PlaybackSession.resumePositionMs = exo?.currentPosition ?: 0L
+                    vm.addSubtitle(track)
+                },
+                // The file was rewritten in place; the player has to re-read it.
+                onSubtitleShifted = {
+                    PlaybackSession.resumePositionMs = exo?.currentPosition ?: 0L
+                    subGen++
+                },
             )
             Overlay.NEXT -> UpNextCard(
                 nextLabel = PlaybackSession.episodes.getOrNull(state.index + 1)?.number
@@ -578,6 +739,8 @@ private fun rememberStreamPlayer(
     stream: Playable.Stream?,
     onEnded: () -> Unit,
     onDead: (String) -> Unit,
+    /** Changes when a sidecar subtitle file is rewritten under us. */
+    subGen: Int = 0,
 ): ExoPlayer? {
     if (stream == null) return null
     val context = LocalContext.current
@@ -592,7 +755,11 @@ private fun rememberStreamPlayer(
     // keeps its callbacks pointing at this composition's logic.
     val currentOnEnded by androidx.compose.runtime.rememberUpdatedState(onEnded)
     val currentOnDead by androidx.compose.runtime.rememberUpdatedState(onDead)
-    val exo = remember(stream.url) {
+    // Subtitles are baked into the media item when the player is built, so
+    // downloading one rebuilds the player. PlaybackSession.resumePositionMs
+    // carries the position across that rebuild.
+    val subtitleKey = stream.subtitles.joinToString("|") { it.url }
+    val exo = remember(stream.url, subtitleKey, subGen) {
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(stream.headers["User-Agent"] ?: Api.USER_AGENT)
             .setDefaultRequestProperties(stream.headers)
@@ -742,7 +909,10 @@ private fun rememberStreamPlayer(
 
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
-private fun NativePlayerView(exo: ExoPlayer) {
+private fun NativePlayerView(exo: ExoPlayer, onView: (PlayerView?) -> Unit) {
+    // The composed view outlives a recomposition; only a real teardown clears
+    // the handle the tuning effects write through.
+    DisposableEffect(Unit) { onDispose { onView(null) } }
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
@@ -758,6 +928,7 @@ private fun NativePlayerView(exo: ExoPlayer) {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
+                onView(this)
             }
         },
         update = { it.player = exo },
@@ -836,4 +1007,64 @@ private fun EmbedPlayer(url: String, onWebView: (WebView?) -> Unit = {}) {
             wv.destroy()
         },
     )
+}
+
+/**
+ * What a playback failure looks like on a TV.
+ *
+ * Three things, because "it didn't play" has three different causes that need
+ * three different answers: the same server usually fails the same way twice, so
+ * Retry is the first thing to reach for; a different rendition is the second;
+ * and leaving is always available, so the screen is never a dead end. [message]
+ * is the decoder's own error code, which is what turns "it didn't play" into
+ * "the host refused the request" or "the codec is not supported on this box".
+ */
+@Composable
+private fun PlaybackErrorCard(
+    message: String,
+    onRetry: () -> Unit,
+    onChooseServer: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val retryFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
+    Box(Modifier.fillMaxSize().background(Color(0xE6000000)), contentAlignment = Alignment.Center) {
+        androidx.tv.material3.Surface(
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+            colors = androidx.tv.material3.SurfaceDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ),
+            modifier = Modifier.width(620.dp),
+        ) {
+            Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This stream didn't start",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    "Error: $message",
+                    color = Color(0xB3FFFFFF),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "The same server usually fails the same way twice. Try it once more, " +
+                        "switch to another server, or leave.",
+                    color = Color(0xB3FFFFFF),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(
+                    Modifier.padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    androidx.tv.material3.Button(
+                        onClick = onRetry,
+                        modifier = Modifier.focusRequester(retryFocus),
+                    ) { Text("Retry") }
+                    androidx.tv.material3.Button(onClick = onChooseServer) { Text("Choose server") }
+                    androidx.tv.material3.Button(onClick = onClose) { Text("Close") }
+                }
+            }
+        }
+    }
 }

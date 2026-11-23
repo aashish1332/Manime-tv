@@ -175,6 +175,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** User picked a specific server from the menu. [fromPositionMs] = where
      *  playback was â€” the new server resumes there instead of restarting. */
+    /**
+     * Attaches a downloaded subtitle to the stream that is playing.
+     *
+     * Subtitles are baked into the media item when the player is built, so this
+     * changes the stream and the player rebuilds around it. The caller parks the
+     * current position in [PlaybackSession.resumePositionMs] first, so the
+     * rebuild resumes where the viewer was instead of restarting the episode.
+     */
+    fun addSubtitle(track: me.desidubanime.tv.data.model.SubtitleTrack) {
+        val current = _state.value.playable as? Playable.Stream ?: return
+        if (current.subtitles.any { it.url == track.url }) return
+        _state.value = _state.value.copy(
+            playable = current.copy(subtitles = current.subtitles + track),
+        )
+        me.desidubanime.tv.data.DebugLog.log("player", "subtitle added: ${track.label}")
+    }
+
     fun selectOption(option: PlayOption, fromPositionMs: Long = 0) {
         if (fromPositionMs > 0) PlaybackSession.resumePositionMs = fromPositionMs
         PlaybackSession.preferredServerLabel = option.stickyKey
@@ -193,16 +210,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // (site ad-walled hai) â€” turant QR sheet kholo, 32s spinner mat dikhaao.
         if (option.isHub && isTwSource(option.sourceLabel)) {
             val held = TwUnlockHolder.take(PlaybackSession.animeId)
+            // A phone-unlocked URL is a SHORTCUT, not a prerequisite. TW4A's
+            // /redirect/ token carries the real hoster link inside its
+            // __PROPS__, and plain HTTP reads that in one GET — so the QR
+            // sheet must never open before resolution has even been tried.
+            // The failure path further down still offers it when a link is
+            // genuinely dead, which is the only case that ever needs it.
             if (held == null) {
-                pendingTw = option
-                pendingTwPosMs = fromPositionMs
-                _state.value = _state.value.copy(
-                    loading = false,
-                    playable = null,
-                    twUnlockUrl = option.embedUrl,
+                me.desidubanime.tv.data.DebugLog.log(
+                    "tw-unlock",
+                    "no phone URL yet — resolving ${option.hoster} over plain HTTP",
                 )
-                return
-            }
+            } else {
             me.desidubanime.tv.data.DebugLog.log("tw-unlock", "using phone URL -> $held")
             _state.value = _state.value.copy(
                 playable = Playable.Stream(
@@ -217,6 +236,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             )
             fetchSkipWindows(_state.value.playable!!)
             return
+            }
         }
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {

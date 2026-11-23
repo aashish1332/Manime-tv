@@ -26,8 +26,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
@@ -205,7 +208,30 @@ fun ControlsOverlay(
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.titleMedium,
             )
-            ProgressBarRow(progress)
+            // The timeline is focusable, and while it holds focus LEFT/RIGHT
+            // is one ±10% step — the convention of every streaming player, and
+            // the only way to cross a 50-minute episode in a few presses. It
+            // has to be handled HERE: the screen's root key handler stands
+            // down while any overlay is open, so it never sees these keys.
+            val scrubberFocus = remember { FocusRequester() }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .focusRequester(scrubberFocus)
+                    .focusable()
+                    .clip(RoundedCornerShape(6.dp))
+                    .onPreviewKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        val step = (progress.duration / 10).coerceAtLeast(10_000L)
+                        when (e.key) {
+                            Key.DirectionLeft -> { onSeek(-step); true }
+                            Key.DirectionRight -> { onSeek(step); true }
+                            else -> false
+                        }
+                    },
+            ) {
+                ProgressBarRow(progress)
+            }
 
             // ---- transport ----
             Row(
@@ -306,6 +332,8 @@ private fun PickerRow(
 fun SeekHud(
     exo: ExoPlayer,
     tick: Int,
+    deltaMs: Long = 0L,
+    targetMs: Long = 0L,
     onHide: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -315,12 +343,27 @@ fun SeekHud(
         onHide()
     }
     Column(
-        modifier
-            .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
-            .padding(horizontal = 40.dp, vertical = 20.dp),
+        modifier.padding(bottom = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        ProgressBarRow(progress)
+        // While a burst is pending the play head is still at the old spot, so
+        // the badge is the only thing that can say where the seek will land.
+        if (deltaMs != 0L) {
+            SeekBadge(
+                deltaMs = deltaMs,
+                targetMs = if (targetMs > 0) targetMs else progress.position,
+                durationMs = progress.duration,
+            )
+        }
+        Row(
+            Modifier
+                .fillMaxWidth(0.62f)
+                .background(Color(0xCC000000), RoundedCornerShape(10.dp))
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+        ) {
+            ProgressBarRow(progress)
+        }
     }
 }
 

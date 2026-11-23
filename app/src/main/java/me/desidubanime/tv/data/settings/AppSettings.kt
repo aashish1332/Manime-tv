@@ -26,6 +26,9 @@ class AppSettings(private val context: Context) {
     private val adKey = stringPreferencesKey("ad_base_url")
     private val twKey = stringPreferencesKey("tw_base_url")
     private val showPlayerLogsKey = booleanPreferencesKey("show_player_logs")
+    private val maxFpsKey = stringPreferencesKey("player_max_fps")
+    private val subScaleKey = stringPreferencesKey("player_sub_scale")
+    private val resizeModeKey = stringPreferencesKey("player_resize_mode")
 
     val adhBaseUrl: Flow<String> = context.settingsDataStore.data.map { prefs ->
         prefs[adhKey]?.takeIf { it.isNotBlank() } ?: DEFAULT_ADH_BASE
@@ -100,6 +103,44 @@ class AppSettings(private val context: Context) {
     }
 
     suspend fun getShowPlayerLogs(): Boolean = showPlayerLogs.first()
+
+    /**
+     * Player picture-size mode, stored as the int value of an
+     * `AspectRatioFrameLayout.RESIZE_MODE_*` constant.
+     * Persisted because a box with a mis-set aspect is a permanent condition,
+     * not a per-episode choice.
+     */
+    val resizeMode: Flow<Int> = context.settingsDataStore.data.map { prefs ->
+        prefs[resizeModeKey]?.toIntOrNull() ?: 0
+    }
+
+    suspend fun resizeMode(): Int = resizeMode.first()
+
+    suspend fun setResizeMode(mode: Int) {
+        context.settingsDataStore.edit { prefs -> prefs[resizeModeKey] = mode.toString() }
+    }
+
+    /** Subtitle text size multiplier (1.0 = Media3 default). */
+    val subtitleScale: Flow<Float> = context.settingsDataStore.data.map { prefs ->
+        prefs[subScaleKey]?.toFloatOrNull() ?: 1f
+    }
+
+    suspend fun subtitleScale(): Float = subtitleScale.first()
+
+    suspend fun setSubtitleScale(scale: Float) {
+        context.settingsDataStore.edit { prefs -> prefs[subScaleKey] = scale.toString() }
+    }
+
+    /** Display refresh-rate hint: "auto" or a fixed fps (24/25/30/50/60). */
+    val maxFps: Flow<String> = context.settingsDataStore.data.map { prefs ->
+        prefs[maxFpsKey]?.takeIf { it.isNotBlank() } ?: "auto"
+    }
+
+    suspend fun maxFps(): String = maxFps.first()
+
+    suspend fun setMaxFps(value: String) {
+        context.settingsDataStore.edit { prefs -> prefs[maxFpsKey] = value }
+    }
 
     companion object {
         const val DEFAULT_ADH_BASE = "https://www.animedubhindi.link"
