@@ -362,8 +362,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             twAttempted = options.any { it.isHub && isTwSource(it.sourceLabel) }
             // Auto-pick the fastest / most reliable server.
             val ordered = orderByPreference(options)
-            _state.value = _state.value.copy(options = options)
+            _state.value = _state.value.copy(options = visibleOptions(options))
             autoResolve(ordered)
+            // A server the resolver gave up on during this attempt should not
+            // linger in the menu afterwards either.
+            _state.value = _state.value.copy(options = visibleOptions(_state.value.options))
         }
     }
 
@@ -489,6 +492,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         return listOf(hit) + ranked.filter { it !== hit }
     }
 
+    /**
+     * Servers the viewer should still see in the menu.
+     *
+     * A host the resolver has proven unreachable (FilePress today: fpgo.xyz
+     * 301s to newN.filepress.lat, which blackholes every connection) is a row
+     * that can only ever fail, so it is hidden instead of offered. The verdict
+     * is the same 5-minute memo the batch race uses, so nothing extra is
+     * probed here. An all-down menu falls back to the full list rather than
+     * leaving the sheet empty.
+     */
+    private fun visibleOptions(options: List<PlayOption>): List<PlayOption> {
+        val visible = options.filterNot {
+            it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster)
+        }
+        if (visible.size != options.size) {
+            me.desidubanime.tv.data.DebugLog.log(
+                "resolve",
+                "menu hides ${options.size - visible.size} down server(s)",
+            )
+        }
+        return visible.ifEmpty { options }
+    }
+
     /** TW source check — label may be "TW" or "ToonWorld" depending on LinkSource enum. */
     private fun isTwSource(label: String?) =
         label.equals("TW", ignoreCase = true) || label.equals("ToonWorld", ignoreCase = true)
@@ -526,6 +552,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // hosts whose plain path failed, not their first attempt.
         val nonGated = ordered
         val gated = ordered.filter { it.isHub && isGatedHoster(it.hoster) }
+        // Keep the menu honest before the first batch even starts: a host that
+        // is already marked down would only add a row that cannot play.
+        if (ordered.any { it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster) }) {
+            _state.value = _state.value.copy(options = visibleOptions(_state.value.options))
+        }
         // Sticky: if it's gated, we'll handle it separately; otherwise include in nonGated.
         val sticky = PlaybackSession.preferredServerLabel
         // First try non-gated with the usual batch race (plain HTTP, no browser)

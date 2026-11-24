@@ -9,6 +9,48 @@ APK: app/build/outputs/apk/debug/app-debug.apk
   Build command: gradlew.bat :app:assembleDebug --no-daemon
 
 ================================================================
+SECTION 00005 - LIVE FILE-HOST CHECK (2026-11-24) + MENU FILTER
+
+Episode used: animedubhindi.link -> "As a Reincarnated Aristocrat S3"
+(series page 200/402KB in 1.9s -> new.adhlinks.com episode page 200/207KB
+in 1.5s). That one episode offers 27 hubcloud.mov links, 27 gdflix.vip,
+21 fpgo.xyz and 6 filebee.live.
+
+1. HUBCloud (hubcloud.mov) - WORKS
+   /drive/<id>                200, 19.6KB, 0.73s
+   -> gamerxyt.com/hubcloud.php?...token=...   200, 19.5KB, 1.37s
+      (the page's own "Download Link Generated" button)
+   -> signed Cloudflare R2 blob  RANGE 0-1MB => 206, 1MB in 0.93s
+      (1.12 MB/s), file is a real 85.97 MB 480p .mkv
+   Mirrors on that page: pixeldrain /u/<id> and pixel.hubcloud.mov.
+   Note: the R2 button carries no id, so it is picked up by the generic
+   crawler (it verifies by range), not by a hubcloud-specific selector.
+   HubCloudScraper.kt is not referenced anywhere - dead code.
+
+2. GDFlix (gdflix.vip) - WORKS
+   /file/<id>  302 -> new10.gdflix.io/file/<id>   200, 43KB, 1.63s
+   POST /mfile/<id>  action=instant + key + x-token:<hostname>
+      => {"error":false,"info":"Success","url":"https://video-downloads..."}
+   that URL => 200, Content-Type video/mkv, bytes flowing (595 KB/s here).
+   It IGNORES Range: a ranged request returns the whole file from byte 0,
+   so seeking is not possible through HTTP ranges on this link.
+
+3. FilePress (fpgo.xyz / filebee.live) - DEAD, site side
+   fpgo.xyz/file/<id>  301 -> new4.filepress.lat/file/<id>  then blackholes
+      (no SYN/response) - curl gives up at 23.6s, 2 redirects, no body.
+   filebee.live/file/<id>  connection never establishes - 21.3s timeout.
+   Nothing the app can do: the origin behind the alias is gone. The alias
+   itself (fpgo.xyz) still answers the 301, which is why the row looks
+   alive until something asks for the file.
+
+4. Menu filter
+   The server sheet now hides hosts the resolver has marked down
+   (visibleOptions() in PlayerViewModel), using the same 5-minute verdict
+   the batch race uses, and re-filters after an attempt. FilePress rows
+   therefore disappear from the menu for the rest of that 5-minute window
+   instead of sitting there as rows that can only fail.
+
+================================================================
 SECTION 00004 - 2026-11-24 SESSION #9 (post-feed stutter, GDFlix,
                                  FilePress, ToonWorld4All, v1.2.1)
 ================================================================
