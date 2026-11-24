@@ -42,6 +42,7 @@ import me.desidubanime.tv.data.model.HomeFeed
 import me.desidubanime.tv.ui.common.AnimeCard
 import me.desidubanime.tv.ui.common.ErrorScreen
 import me.desidubanime.tv.ui.common.LoadingScreen
+import me.desidubanime.tv.ui.common.Spinner
 import me.desidubanime.tv.ui.common.UiState
 import me.desidubanime.tv.ui.common.WatchCard
 
@@ -347,7 +348,7 @@ private fun SidebarItem(
         modifier = Modifier.fillMaxWidth(),
     ) {
         if (spinning) {
-            androidx.compose.material3.CircularProgressIndicator(
+            Spinner(
                 modifier = Modifier.size(16.dp),
                 strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.primary,

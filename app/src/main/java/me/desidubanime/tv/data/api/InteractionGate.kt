@@ -1,6 +1,8 @@
 package me.desidubanime.tv.data.api
 
+import kotlinx.coroutines.delay
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Priority gate between the user's foreground work and the app's background
@@ -34,6 +36,14 @@ object InteractionGate {
     private val feedHold = AtomicInteger(0)
     private val lock = Object()
 
+    /**
+     * When foreground work last finished. Background catalog jobs read this to
+     * wait for a genuinely idle moment instead of starting in the middle of a
+     * scroll: the sweeps are HTML fetches plus Jsoup parses on the same cores
+     * the UI thread and the video decoder need.
+     */
+    private val lastForegroundAt = AtomicLong(0L)
+
     /** True while at least one click-time operation is in flight. */
     val busy: Boolean get() = clicks.get() > 0
 
@@ -47,6 +57,26 @@ object InteractionGate {
             return block()
         } finally {
             release(clicks)
+        }
+    }
+
+    /**
+     * Suspend until nothing has been in flight for [quietMs].
+     *
+     * Used by the background catalog jobs and by the feed re-merge: both are
+     * expensive (hundreds of requests / a whole grid swap) and neither has a
+     * deadline, so starting one while the viewer is navigating is pure stutter.
+     * Bounded by [QUIET_MAX_WAIT_MS] so a long playback-style hold can never
+     * park a sweep forever.
+     */
+    suspend fun awaitQuiet(quietMs: Long = DEFAULT_QUIET_MS) {
+        val deadline = System.currentTimeMillis() + QUIET_MAX_WAIT_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (!foreground) {
+                val idleFor = System.currentTimeMillis() - lastForegroundAt.get()
+                if (idleFor >= quietMs) return
+            }
+            delay(250L)
         }
     }
 
@@ -65,6 +95,7 @@ object InteractionGate {
 
     private fun release(counter: AtomicInteger) {
         if (counter.decrementAndGet() <= 0) {
+            lastForegroundAt.set(System.currentTimeMillis())
             // Clamp: a stray leave() must never drive the counter negative and
             // wedge the gate shut for the rest of the process.
             counter.updateAndGet { if (it < 0) 0 else it }
@@ -101,4 +132,10 @@ object InteractionGate {
     }
 
     private const val DEFAULT_MAX_WAIT_MS = 8_000L
+
+    /** Default idle window before a background job may start. */
+    private const val DEFAULT_QUIET_MS = 2_000L
+
+    /** Never park a background job longer than this, whatever the UI is doing. */
+    private const val QUIET_MAX_WAIT_MS = 90_000L
 }

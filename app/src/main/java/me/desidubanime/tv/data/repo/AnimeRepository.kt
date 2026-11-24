@@ -1,11 +1,13 @@
 package me.desidubanime.tv.data.repo
 
+import me.desidubanime.tv.data.DebugLog
 import me.desidubanime.tv.data.api.InteractionGate
 import me.desidubanime.tv.data.api.Network
 import me.desidubanime.tv.data.api.WpService
 import me.desidubanime.tv.data.cache.AdhSlugStore
 import me.desidubanime.tv.data.cache.EnglishTitleStore
 import me.desidubanime.tv.data.cache.FeedCacheStore
+import me.desidubanime.tv.data.cache.FeedCursor
 import me.desidubanime.tv.data.model.AdhEpisodePage
 import me.desidubanime.tv.data.model.AdhInfo
 import me.desidubanime.tv.data.model.Anime
@@ -27,6 +29,7 @@ import me.desidubanime.tv.scrape.AnimeDriveScraper
 import me.desidubanime.tv.scrape.EpisodeScraper
 import me.desidubanime.tv.scrape.TitleScraper
 import me.desidubanime.tv.scrape.ToonWorldScraper
+import me.desidubanime.tv.util.SearchMatch
 import me.desidubanime.tv.util.Titles
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -131,20 +134,28 @@ class AnimeRepository(
     private fun startBackgroundWork() {
         if (sweepsStarted) return
         sweepsStarted = true
-        startCatalogWarm()
-        // Slug sweep may already have run if the catalog fetch beat the feed.
-        // Only the ADH sweep exists: AD and TW episode pages carry no
-        // "Watch online" slug (their matching is title-based — mergeAd/
-        // mergeTw + on-demand findAdFor/findTwFor), so sweeping them was
-        // ~1200 page fetches that could never learn anything, starved the
-        // bulk lane after the first feed, and the AD sweep even wrote its
-        // postIds into the ADH slug store. Removed.
-        adhCatalog?.value?.takeIf { it.isNotEmpty() }?.let { startSlugSweep(it) }
+        // THE UI COMES FIRST. This used to fire the three catalog fetches — and
+        // the ~600-page slug sweep behind them — the instant the first feed
+        // landed, while the grid was still binding posters and the viewer was
+        // already moving the focus ring. Every one of those requests is an HTML
+        // fetch plus a Jsoup parse on the same cores the renderer needs, which
+        // is exactly the "sticky right after opening" the user reported.
+        //
+        // Now the chain waits out a settle window, then for the app to go
+        // quiet (no click and no feed build in flight), and only then trickles
+        // — the ADH catalog warm starts the slug sweep when it finishes, and
+        // that sweep waits for quiet again before its first page.
+        bgScope.launch {
+            kotlinx.coroutines.delay(BACKGROUND_SETTLE_MS)
+            InteractionGate.awaitQuiet(QUIET_BEFORE_BACKGROUND_MS)
+            runCatching { startCatalogWarm() }
+        }
         // The title sweep is the least urgent job in the app (it only improves
-        // names already readable). Let the feed settle and the first posters
-        // decode before it starts adding HTML parses on top.
+        // names already readable). It gets the longest delay so it lands after
+        // the sweep above has begun and the viewer has settled into a screen.
         bgScope.launch {
             kotlinx.coroutines.delay(TITLE_SWEEP_DELAY_MS)
+            InteractionGate.awaitQuiet(QUIET_BEFORE_BACKGROUND_MS)
             runCatching { startTitleSweep() }
         }
         // BADGE RELEASE VALVE. sourcesComplete() waits for ALL three catalogs
@@ -209,6 +220,14 @@ class AnimeRepository(
     private val animeCache = LruMap<Int, Cached<Anime>>(200)
     private val episodesCache = LruMap<Int, Cached<List<Episode>>>(200)
     private val seasonsCache = LruMap<Int, Cached<List<Anime>>>(200)
+
+    /**
+     * Recent searches keyed by normalized query. The screen debounces typing,
+     * but a back-navigation or the detail screen's season switcher (which
+     * searches by base name) repeats the exact same query — and that used to
+     * re-ask all four sites every single time.
+     */
+    private val searchCache = LruMap<String, Cached<List<Anime>>>(SEARCH_CACHE_ENTRIES)
 
     /** slug -> English title, learned from scraped pages; grows for the process lifetime. */
     private val englishTitles = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -399,6 +418,10 @@ class AnimeRepository(
             remergeJob?.cancel()
             remergeJob = bgScope.launch {
                 kotlinx.coroutines.delay(delayMs)
+                // A re-merge swaps the whole grid (every card rebinds its
+                // poster). It must never land while the viewer is clicking
+                // through the app — that is a visible hitch, not a refresh.
+                InteractionGate.awaitQuiet(RE_MERGE_QUIET_MS)
                 runCatching { fetchHomeFeed() }
             }
         }
@@ -513,6 +536,10 @@ class AnimeRepository(
         slugSweepStarted = true
         bgScope.launch {
             storesLoaded.await()
+            // Never start ~600 page fetches in the middle of a scroll. The
+            // catalog warm already waited for quiet, but the viewer can start
+            // navigating again in the second it took to answer.
+            InteractionGate.awaitQuiet(QUIET_BEFORE_BACKGROUND_MS)
             val missing = posts.filter { learnedDdaSlug[it.postId].isNullOrBlank() }
             if (missing.isEmpty()) return@launch
             // 2 at a time, and every request also parks at InteractionGate while
@@ -699,8 +726,111 @@ class AnimeRepository(
      * lands (no blank flash).
      */
     suspend fun refreshHomeFeed(): HomeFeed = withContext(Dispatchers.IO) {
+        val base = feedCache?.value ?: feedStore?.load()
+        val cursor = loadFeedCursor()
+        if (base != null && cursor != null && cursor.savedAt > 0L) {
+            // Biased towards rebuilding: if the probe itself fails, fall through
+            // to the full merge rather than serving a possibly stale feed.
+            val changed = runCatching { probeForNewContent(cursor) }.getOrDefault(true)
+            if (!changed) {
+                DebugLog.log("feed", "refresh: nothing new since last build — cache reused")
+                feedCache = Cached(System.currentTimeMillis(), base)
+                // The probe may be the only thing this session ran, and the
+                // sweeps still need their kick. Idempotent.
+                startBackgroundWork()
+                return@withContext base
+            }
+            DebugLog.log("feed", "refresh: something new — rebuilding")
+        }
         synchronized(feedLoadLock) { feedCache = null }
         homeFeed()
+    }
+
+    /**
+     * Last build's coverage, read from disk on each refresh instead of kept in
+     * memory: the feed cache is dropped in several places (a changed ADH domain,
+     * a settings reset), and a cursor that outlived those would describe a build
+     * the app has already discarded — letting a refresh answer "nothing new"
+     * about a feed it no longer has. One small file read per manual refresh is
+     * cheaper than that class of bug.
+     */
+    private fun loadFeedCursor(): FeedCursor? = feedStore?.loadCursor()
+
+    private fun saveFeedCursor(cursor: FeedCursor) {
+        feedStore?.saveCursor(cursor)
+    }
+
+    /** Lexicographic max of ISO-8601 stamps — the ordering this app already uses. */
+    private fun newestStamp(values: List<String>): String =
+        values.filter { it.isNotBlank() }.maxOrNull().orEmpty()
+
+    /**
+     * Is anything newer than the last successful build?
+     *
+     * Every source is asked the same question — "what is your newest stamp?" —
+     * and the answer is compared against the one the last build recorded. DDA
+     * answers it with a ONE-ITEM collection ordered exactly like its catalogs
+     * (`modified` for anime, `date` for episodes); the scraped sites answer from
+     * the latest window already in memory, so they cost no network while the
+     * catalog cache is warm. Total: two tiny requests and no catalog work,
+     * whatever the size of the catalog.
+     *
+     * Not `modified_after` / `after`. Measured against a live WordPress these
+     * are silently ignored when the post type does not declare support for
+     * them: the collection comes back unfiltered, the probe sees items, and the
+     * refresh rebuilds forever — the feature would quietly do nothing. Ordering
+     * by the field and reading one item cannot fail that way, and it also
+     * catches EDITS, which bump an anime's `modified` and therefore make it the
+     * newest row.
+     *
+     * Fails open: a failed request or a blank stamp reports "changed", so a
+     * refresh degrades to the old full rebuild instead of hiding new episodes.
+     */
+    private suspend fun probeForNewContent(cursor: FeedCursor): Boolean = withContext(Dispatchers.IO) {
+        // A FAILED check is not an empty answer. DDA sits behind Cloudflare,
+        // which answers a blocked request with a 403 and an HTML page; folding
+        // that into `emptyList()` would read as "nothing new" and freeze the
+        // feed behind a stale cache for as long as the block lasted. Any failure
+        // therefore means "rebuild" — the full path retries the sources anyway.
+        val newestAnime = runCatching { wpFeed.listAnime(perPage = 1, embed = 0, orderBy = "modified") }
+        if (newestAnime.isFailure) {
+            DebugLog.log("feed", "probe: anime check failed — rebuilding")
+            return@withContext true
+        }
+        val animeStamp = newestAnime.getOrThrow().firstOrNull()?.modified.orEmpty()
+        if (animeStamp > cursor.ddaModified) {
+            DebugLog.log("feed", "probe: anime changed ($animeStamp)")
+            return@withContext true
+        }
+
+        val newestEpisode = runCatching { wpFeed.listEpisodes(perPage = 1) }
+        if (newestEpisode.isFailure) {
+            DebugLog.log("feed", "probe: episode check failed — rebuilding")
+            return@withContext true
+        }
+        val episodeStamp = newestEpisode.getOrThrow().firstOrNull()?.date.orEmpty()
+        if (episodeStamp > cursor.episodeDate) {
+            DebugLog.log("feed", "probe: new episode ($episodeStamp)")
+            return@withContext true
+        }
+
+        val adh = adhPostsForMerge(Network.feed)
+        if (adh.isNotEmpty() && newestStamp(adh.map { it.modified }) > cursor.adhModified) {
+            DebugLog.log("feed", "probe: AnimeDubHindi changed")
+            return@withContext true
+        }
+        val ad = adPostsForMerge(Network.feed)
+        if (ad.isNotEmpty() && newestStamp(ad.map { it.modified }) > cursor.adModified) {
+            DebugLog.log("feed", "probe: AnimeDrive changed")
+            return@withContext true
+        }
+        val tw = twPostsForMerge(Network.feed)
+        if (tw.isNotEmpty() && newestStamp(tw.map { it.modified }) > cursor.twModified) {
+            DebugLog.log("feed", "probe: ToonWorld4All changed")
+            return@withContext true
+        }
+        DebugLog.log("feed", "probe: nothing newer than the cached build")
+        false
     }
 
     suspend fun homeFeed(): HomeFeed = withContext(Dispatchers.IO) {
@@ -818,9 +948,9 @@ class AnimeRepository(
             // until the first upload lands. The old filter also let a card
             // through just because an ADH post existed, but ADH/AD/T4A create
             // PLACEHOLDER posts for unreleased shows too, so those cards
-            // rendered with zero episodes ("release hone wale anime bhi dikh
-            // rahe hain"). Only a hit in DDA's episode feed proves real
-            // episodes exist; that feed covers uploads on every site's schedule.
+            // rendered with zero episodes. Only a hit in DDA's episode feed
+            // proves real episodes exist; that feed covers uploads on every
+            // site's schedule.
             all = all.filter {
                 !it.upcoming || it.slug in latestEpisodeAt
             }
@@ -854,6 +984,22 @@ class AnimeRepository(
             HomeFeed(newEpisodes = newEpisodes, newReleases = newReleases, all = all)
                 .also { feedCache = Cached(System.currentTimeMillis(), it) }
                 .also { feedStore?.save(it) }
+                // Record what this build covered, so the next refresh can ask
+                // "anything new?" instead of rebuilding. Stamped FROM the
+                // sources, not from the clock: a source that was slow but
+                // already current must not look newer than its own newest post.
+                .also {
+                    saveFeedCursor(
+                        FeedCursor(
+                            ddaModified = newestStamp(ddaRaw.map { a -> a.updatedAt }),
+                            episodeDate = newestStamp(episodeFeed.map { e -> e.date }),
+                            adhModified = newestStamp(adhPosts.map { p -> p.modified }),
+                            adModified = newestStamp(adPosts.map { p -> p.modified }),
+                            twModified = newestStamp(twPosts.map { p -> p.modified }),
+                            savedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
                 .also { runCatching { flushTitleLearns() } }
                 // The user is looking at a feed now — background sweeps may
                 // start. Until this point they'd be competing with the one
@@ -1384,12 +1530,37 @@ class AnimeRepository(
         return fused
     }
 
+    /**
+     * Search across all four sites, ranked by how well each result's TITLE
+     * matches the query.
+     *
+     * ACCURACY — WordPress' `search` parameter matches the post BODY as well as
+     * the title, and results come back in recency order, so a plain merge puts
+     * shows whose synopsis merely mentions the word ahead of the show being
+     * looked for. Results are therefore partitioned on their OWN titles after
+     * the merge ([rankSearch]): exact > starts-with > contains > word-order >
+     * one-typo. A content-only hit is hidden only when some real title match
+     * exists, so recall is never silently lost. The in-memory catalogs are
+     * scanned too: the sites' own search cannot find word-order variants
+     * ("slime reincarnated") or typos, and those are exactly what a TV remote's
+     * on-screen keyboard produces.
+     *
+     * SPEED — two things made searches slow: every press re-asked all four
+     * sites (the screen debounces, but back-navigation and the season switcher
+     * re-ran the whole thing), and the merge ran the [MAX_SLUG_LOOKUPS] HTML
+     * lane. Results are cached per normalized query for [SEARCH_TTL_MS] on a
+     * small LRU, and the merge runs the feed lane ([Network.feed]), which caps
+     * adhlinks page fetches at [FEED_SLUG_LOOKUPS].
+     */
     suspend fun search(query: String): List<Anime> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
+        val qNorm = SearchMatch.normalize(query)
+        if (qNorm.isEmpty()) return@withContext emptyList()
+        searchCache[qNorm].fresh(SEARCH_TTL_MS)?.let { return@withContext it }
         awaitStores()
         coroutineScope {
-            // ADH first-class: WP search + a local scan of the cached catalog
-            // (covers typos in WP search / server hiccups). DDA is best-effort.
+            // ADH first-class: WP search + a local scan of the cached catalog.
+            // DDA is best-effort.
             val ddaDeferred = async {
                 runCatching { wp.searchAnime(query).map { it.toAnime().withEnglishTitle() } }
                     .getOrDefault(emptyList())
@@ -1397,40 +1568,96 @@ class AnimeRepository(
             val adhDeferred = async { runCatching { adh.search(query) }.getOrDefault(emptyList()) }
             val adDeferred = async { runCatching { ad.search(query) }.getOrDefault(emptyList()) }
             val twDeferred = async { runCatching { tw.search(query) }.getOrDefault(emptyList()) }
-            val q = query.lowercase().filter { it.isLetterOrDigit() }
-            val fromAdhCatalog = if (q.length >= 3) {
-                (adhCatalog?.value.orEmpty()).filter {
-                    it.displayTitle.lowercase().filter(Char::isLetterOrDigit).contains(q)
-                }
-            } else {
-                emptyList()
+            val qTokens = SearchMatch.tokens(query)
+            val scannable = qNorm.length >= SearchMatch.MIN_QUERY_LENGTH
+            // STRICT title scan of the in-memory catalogs: no network once they
+            // are warm, and the part that still works when a site's own search
+            // is down, rate-limited, or has filled its 20 result slots with
+            // content matches. The typo pass deliberately lives further down.
+            fun strictHit(title: String): Boolean =
+                scannable && SearchMatch.tier(title, qNorm, qTokens) > SearchMatch.TIER_NONE
+            var fromAdhCatalog = adhCatalog?.value.orEmpty().filter { strictHit(it.displayTitle) }
+            var fromAdCatalog = adCatalog?.value.orEmpty().filter { strictHit(it.displayTitle) }
+            var fromTwCatalog = twCatalog?.value.orEmpty().filter { strictHit(it.displayTitle) }
+
+            val ddaResults = ddaDeferred.await()
+            val adhSearch = adhDeferred.await()
+            val adSearch = adDeferred.await()
+            val twSearch = twDeferred.await()
+
+            // TYPO PASS — only when NOTHING matched a title strictly. An answer
+            // that already exists must never pay for a whole-catalog scan on
+            // every key press: this box has few cores and little RAM. A dead end
+            // is the one case where the scan is worth its cost, because the
+            // viewer is looking at "No results".
+            val anyStrict = fromAdhCatalog.isNotEmpty() || fromAdCatalog.isNotEmpty() ||
+                fromTwCatalog.isNotEmpty() ||
+                (adhSearch + adSearch).any {
+                    SearchMatch.tier(it.displayTitle, qNorm, qTokens) > SearchMatch.TIER_NONE
+                } ||
+                twSearch.any { SearchMatch.tier(it.displayTitle, qNorm, qTokens) > SearchMatch.TIER_NONE } ||
+                ddaResults.any { SearchMatch.tier(it.title, qNorm, qTokens) > SearchMatch.TIER_NONE }
+            if (!anyStrict && qNorm.length >= SearchMatch.FUZZY_MIN_LENGTH) {
+                fun typoHit(title: String): Boolean =
+                    SearchMatch.fuzzyTier(title, qTokens) > SearchMatch.TIER_NONE
+                fromAdhCatalog = adhCatalog?.value.orEmpty().filter { typoHit(it.displayTitle) }
+                fromAdCatalog = adCatalog?.value.orEmpty().filter { typoHit(it.displayTitle) }
+                fromTwCatalog = twCatalog?.value.orEmpty().filter { typoHit(it.displayTitle) }
             }
-            val fromAdCatalog = if (q.length >= 3) {
-                (adCatalog?.value.orEmpty()).filter {
-                    it.displayTitle.lowercase().filter(Char::isLetterOrDigit).contains(q)
-                }
-            } else {
-                emptyList()
-            }
-            val fromTwCatalog = if (q.length >= 3) {
-                (twCatalog?.value.orEmpty()).filter {
-                    it.displayTitle.lowercase().filter(Char::isLetterOrDigit).contains(q)
-                }
-            } else {
-                emptyList()
-            }
-            val adhResults = (adhDeferred.await() + fromAdhCatalog).distinctBy { it.postId }
-            val adResults = (adDeferred.await() + fromAdCatalog).distinctBy { it.postId }
-            val twResults = (twDeferred.await() + fromTwCatalog).distinctBy { it.postId }
-            val merged = mergeAdhFirst(adhResults, ddaDeferred.await())
+
+            val adhResults = (adhSearch + fromAdhCatalog).distinctBy { it.postId }
+            val adResults = (adSearch + fromAdCatalog).distinctBy { it.postId }
+            val twResults = (twSearch + fromTwCatalog).distinctBy { it.postId }
+            // Feed lane: a search is a critical path too, and the background
+            // slug sweep finishes whatever this small budget skips.
+            val merged = mergeAdhFirst(adhResults, ddaResults, Network.feed)
             // Collapse cross-site twins here too — a search for one show used to
             // return it two or three times, once per site. Different seasons
             // have different title keys, so the season switcher still sees them
             // all as separate entries. Upcoming placeholders stay hidden here
             // as well.
-            collapseDuplicates(attachKnownSources(mergeTw(mergeAd(merged, adResults), twResults)))
-                .filter { !it.upcoming }
+            val ranked = rankSearch(
+                collapseDuplicates(attachKnownSources(mergeTw(mergeAd(merged, adResults), twResults)))
+                    .filter { !it.upcoming },
+                query,
+            )
+            // Never cache an EMPTY answer: a site hiccup would then read as "no
+            // such anime" for the whole TTL.
+            if (ranked.isNotEmpty()) searchCache[qNorm] = Cached(System.currentTimeMillis(), ranked)
+            ranked
         }
+    }
+
+    /**
+     * Order search hits by how well their title matches, then by recency.
+     *
+     * WordPress matches the search term against the post body, which is why a
+     * query for one show also returned unrelated posts whose synopsis happens to
+     * contain the word — in recency order, so they could sit above the show
+     * itself. Tiering after the merge fixes the ORDER without narrowing what the
+     * sites were asked for: content-only hits are hidden only when at least one
+     * real title hit exists, and returned (recency-ordered, as before) when none
+     * does. The search box must never answer "nothing" because the one show the
+     * user wanted was titled differently from its own description.
+     */
+    private fun rankSearch(list: List<Anime>, query: String): List<Anime> {
+        if (list.size < 2) return list
+        val qNorm = SearchMatch.normalize(query)
+        if (qNorm.isEmpty()) return list
+        val qTokens = SearchMatch.tokens(query)
+        val tiers = IntArray(list.size) { SearchMatch.tier(list[it].title, qNorm, qTokens) }
+        // Typo pass ONLY when no title matched strictly: it exists to turn a
+        // dead-end search into a result, so a key press that already had a real
+        // answer never pays for it.
+        if (tiers.none { it > SearchMatch.TIER_NONE } && qNorm.length >= SearchMatch.FUZZY_MIN_LENGTH) {
+            for (i in tiers.indices) tiers[i] = SearchMatch.fuzzyTier(list[i].title, qTokens)
+        }
+        val titled = tiers.any { it > SearchMatch.TIER_NONE }
+        val keep = if (titled) tiers.indices.filter { tiers[it] > SearchMatch.TIER_NONE } else tiers.indices.toList()
+        return keep.sortedWith(
+            compareByDescending<Int> { tiers[it] }
+                .thenByDescending { maxOf(list[it].latestEpisodeAt, list[it].updatedAt, list[it].publishedAt) },
+        ).map { list[it] }
     }
 
     /**
@@ -2197,20 +2424,35 @@ class AnimeRepository(
         const val FEED_TTL_MS = 60_000L            // home refreshes at most once a minute
         const val ADH_CATALOG_TTL_MS = 10 * 60_000L // full ADH catalog (~6 requests) refetch
         const val ANIME_TTL_MS = 10 * 60_000L      // detail info rarely changes
+        /** Search answers kept per normalized query; back-nav and seasons() reuse them. */
+        const val SEARCH_TTL_MS = 3 * 60_000L
+        const val SEARCH_CACHE_ENTRIES = 12
         const val EPISODES_TTL_MS = 2 * 60_000L    // new episodes should show up quickly
         const val MAX_SLUG_LOOKUPS = 20            // adhlinks/slug fetches per merge (learned once per post, persisted)
         /** Feed-lane cap: the sweep finishes the rest off the critical path. */
         const val FEED_SLUG_LOOKUPS = 6
         const val FEED_LOOKUP_PARALLELISM = 4      // ...of which this many run at once (scrapers use sync execute(), which Dispatcher doesn't throttle)
         /** Settle window before a background catalog/sweep result re-merges the feed. */
-        const val RE_MERGE_DEBOUNCE_MS = 2_500L
+        const val RE_MERGE_DEBOUNCE_MS = 6_000L
+        /** ...and the app must have been idle this long before that merge starts. */
+        const val RE_MERGE_QUIET_MS = 1_500L
         /** Gap between the three catalog warm-ups (one Wi-Fi radio, weak SoC). */
         const val CATALOG_STAGGER_MS = 1_500L
+        /**
+         * Dead time after the first feed before ANY background job may start.
+         * Covers the launch burst: poster decodes, the first focus moves and
+         * the ON_RESUME refresh. Background work has no deadline; the user's
+         * first impression does.
+         */
+        const val BACKGROUND_SETTLE_MS = 10_000L
+        /** Idle window required before a background job may begin. */
+        const val QUIET_BEFORE_BACKGROUND_MS = 2_000L
         /** Below this many learned names, the title listings stay on the feed path. */
         const val TITLE_WARM_MIN = 200
-        const val TITLE_SWEEP_DELAY_MS = 4_000L
+        /** Last of the three jobs: names already render, so this can wait. */
+        const val TITLE_SWEEP_DELAY_MS = 30_000L
         /** Breath between sweep pages so parses do not own every core. */
-        const val SWEEP_PAGE_GAP_MS = 120L
+        const val SWEEP_PAGE_GAP_MS = 250L
         const val TOKEN_BUCKET_LIMIT = 60          // words shared by more cards than this carry no signal for dedup
         const val STORES_WAIT_MS = 4_000L          // cap on waiting for the persisted title/slug maps
         const val TITLE_WARM_MS = 6_000L           // cap on waiting for the two English-title listing pages

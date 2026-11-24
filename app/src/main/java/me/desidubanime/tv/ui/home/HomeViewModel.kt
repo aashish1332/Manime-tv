@@ -101,7 +101,7 @@ class HomeViewModel : ViewModel() {
             }
             val list = runCatching { repo.animePage(page) }.getOrDefault(emptyList())
             _pageAnime.value = if (list.isEmpty()) {
-                UiState.Error("Is page pe kuch nahi mila.")
+                UiState.Error("No anime found on that page.")
             } else {
                 UiState.Success(list)
             }
@@ -121,6 +121,25 @@ class HomeViewModel : ViewModel() {
         // mergedCatalog() which fetches the full ADH + DDA catalogs (18
         // requests). The default estimate of 20 pages is fine; the actual
         // count is fetched lazily on first sidebar navigation in selectPage().
+    }
+
+    /**
+     * Publish a feed ONLY when it differs from what is already on screen.
+     *
+     * The first seconds after launch produce several complete feeds: the
+     * persisted one, the network one, and a re-merge each time a source catalog
+     * lands. Every swap recomposes the whole grid and re-binds ~30 posters in
+     * Coil, which on a low-RAM TV box is exactly the stutter the user sees
+     * "while refreshing" — and most of those re-merges are identical. HomeFeed
+     * and Anime are data classes, so the comparison is structural and cheap
+     * next to a repaint.
+     */
+    private var lastPublished: HomeFeed? = null
+
+    private fun publish(feed: HomeFeed) {
+        if (feed == lastPublished) return
+        lastPublished = feed
+        _state.value = UiState.Success(feed)
     }
 
     /**
@@ -157,7 +176,7 @@ class HomeViewModel : ViewModel() {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             runCatching { tracked { repo.homeFeed() } }
-                .onSuccess { _state.value = UiState.Success(it) }
+                .onSuccess { publish(it) }
             // Failure: keep showing what we have.
         }
     }
@@ -171,7 +190,7 @@ class HomeViewModel : ViewModel() {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             runCatching { tracked { repo.refreshHomeFeed() } }
-                .onSuccess { _state.value = UiState.Success(it) }
+                .onSuccess { publish(it) }
             // Failure: keep whatever we have.
         }
     }
@@ -188,11 +207,11 @@ class HomeViewModel : ViewModel() {
         viewModelScope.launch {
             if (!hadData) {
                 repo.cachedFeed()?.let { cached ->
-                    if (_state.value is UiState.Loading) _state.value = UiState.Success(cached)
+                    if (_state.value is UiState.Loading) publish(cached)
                 }
             }
             runCatching { tracked { repo.homeFeed() } }
-                .onSuccess { _state.value = UiState.Success(it) }
+                .onSuccess { publish(it) }
                 .onFailure {
                     if (_state.value !is UiState.Success) {
                         _state.value = UiState.Error(it.message ?: "Failed to load")

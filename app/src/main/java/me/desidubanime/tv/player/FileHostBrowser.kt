@@ -46,7 +46,7 @@ class FileHostBrowser(private val appContext: Context) {
 
     private val main = Handler(Looper.getMainLooper())
 
-    /** Ek waqt me sirf EK browser WebView â€” do heavy rasters + decoder = weak-box reboot. */
+    /** Only one browser WebView at a time â€” two heavy rasters plus the decoder rebooted weak boxes. */
     private val gate = kotlinx.coroutines.sync.Semaphore(1)
 
     /** Captured XHR/fetch URLs from the page. */
@@ -287,7 +287,7 @@ class FileHostBrowser(private val appContext: Context) {
                     }
                     if (!sawPage) {
                         sawPage = true
-                        DebugLog.log("browser", "page ready (${doc.length}b)" + if (sawChallenge) " â€” challenge cleared" else "")
+                        DebugLog.log("browser", "page ready (${doc.length}b)" + if (sawChallenge) " - challenge cleared" else "")
                     }
                     if (!clickDownloads) {
                         settle(Outcome(html = doc))
@@ -333,7 +333,7 @@ if (pageUrl.contains("gdflix", ignoreCase = true) && t < 15000L) t = 15000L  // 
 
             cont.invokeOnCancellation { main.post { settled = true; cleanup() } }
             post(timeoutMs) {
-                DebugLog.log("browser", "timeout â€” nothing captured")
+                DebugLog.log("browser", "timeout - nothing captured")
                 settle(Outcome())
             }
 

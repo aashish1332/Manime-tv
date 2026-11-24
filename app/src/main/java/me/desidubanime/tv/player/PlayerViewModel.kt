@@ -81,7 +81,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(twUnlockUrl = null)
     }
 
-    /** Phone se unlocked URL aa chuka hai -> wahi TW option dobara resolve karo. */
+    /** A phone-unlocked URL has arrived — resolve that same TW option again. */
     fun resumeTwUnlock(currentPosMs: Long) {
         val opt = pendingTw ?: return
         dismissTwUnlock()
@@ -206,8 +206,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             },
         )
         me.desidubanime.tv.data.DebugLog.log("tw-unlock", "pick: ${option.label} isHub=${option.isHub} src=${option.sourceLabel}")
-        // TW pick: holder khali hai to resolution ki koi gunjaish nahi hai
-        // (site ad-walled hai) â€” turant QR sheet kholo, 32s spinner mat dikhaao.
+        // TW pick: the holder is empty (the site is ad-walled). The QR sheet is
+        // NOT opened here — resolution is attempted first.
         if (option.isHub && isTwSource(option.sourceLabel)) {
             val held = TwUnlockHolder.take(PlaybackSession.animeId)
             // A phone-unlocked URL is a SHORTCUT, not a prerequisite. TW4A's
@@ -247,8 +247,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 null
             } ?: if (option.isHub) {
-                // QR marker = /redirect/ token URL (T4A). Label/source kuch
-                // bhi ho — jis episode ka token hai wahi unlock chalega.
+                // QR marker = a /redirect/ token URL (T4A). Whatever the label
+                // or source claims, only the episode owning the token unlocks.
                 if (option.embedUrl.contains("/redirect/", ignoreCase = true)) {
                     pendingTw = option
                     pendingTwPosMs = fromPositionMs
@@ -261,7 +261,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _state.value = _state.value.copy(
                     loading = false,
-                    message = "${option.hoster} (${option.sourceLabel ?: "link"}) se stream nahi mila — dusra server chuno.",
+                    message = "${option.hoster} (${option.sourceLabel ?: "link"}) returned no stream — pick another server.",
                 )
                 return@launch
             } else {
@@ -370,7 +370,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** Append the TW4A unlock hint when this episode had TW servers in play. */
     private fun withTwHint(base: String): String =
         if (twAttempted) {
-            "$base\nFor TW, unlock first: Home → 'TW4A ads QR' → solve 3 ads on phone."
+            // ToonWorld4All resolves through its /redirect/ token over plain
+            // HTTP, so no unlock step is required. Only a genuinely dead row
+            // offers the QR sheet, and the menu should never send the viewer to
+            // watch ads before trying another server.
+            "$base\nToonWorld4All: try a HubCloud or GDFlix row from the server list."
         } else base
 
     /**
@@ -508,13 +512,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * a direct stream. Sequential resolving took 8-12s *per* server (40s+ starts),
      * so we run [PARALLEL_RESOLVES] offscreen WebViews at once instead.
      * If none yield a stream, use the best candidate as a WebView embed so
-     * playback still works ("kaam hona chahiye").
+     * playback still works.
      */
     private suspend fun autoResolve(ordered: List<PlayOption>) {
         val embeds = HashMap<PlayOption, Playable>()
         var tried = 0
-        // Split: non-gated hosts (plain HTTP) and gated hosts (need browser)
-        val nonGated = ordered.filter { !it.isHub || !isGatedHoster(it.hoster) }
+        // EVERY hub gets the fast plain-HTTP pass — including the hosts that
+        // USED to be reserved for the browser phase. GDFlix answers plain HTTP
+        // with no challenge now (verified live: 302 -> newN.gdflix.io, 200,
+        // then one POST to /mfile/<id> mints the file), so keeping it out of
+        // this pass only delayed the server the viewer most likely wanted by a
+        // whole browser-unlock round. `gated` below is the SECOND chance for
+        // hosts whose plain path failed, not their first attempt.
+        val nonGated = ordered
         val gated = ordered.filter { it.isHub && isGatedHoster(it.hoster) }
         // Sticky: if it's gated, we'll handle it separately; otherwise include in nonGated.
         val sticky = PlaybackSession.preferredServerLabel
@@ -592,7 +602,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Resolve a batch concurrently, then pick the FIRST-BY-PRIORITY success â€”
      * NOT the first to FINISH. Completion-order picking broke the user rule
-     * ("priority order me jo pehle working server mile usse play"): a lower-
+     * (the highest-priority working server plays, not the fastest to answer): a lower-
      * ranked server resolving faster than a higher-ranked one would win the
      * race. Now every member settles, embeds are stashed, and the earliest
      * index holding a direct stream wins. Wall-clock cost is the slowest
@@ -648,7 +658,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         /**
          * Distinct file HOSTS given a browser-unlock attempt after the fast
          * pass. 3 hosts x 30s caps the whole unlock phase at ~90s worst-case
-         * â€” the user called the previous 5x40s "bohot time leta hai".
+         * — this replaced the previous five 40s attempts.
          */
         const val BROWSER_RETRIES = 3
 

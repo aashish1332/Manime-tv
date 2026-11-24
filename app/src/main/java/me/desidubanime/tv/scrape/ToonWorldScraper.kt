@@ -166,7 +166,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
             // (cache-poisoned body / CF challenge / shape change)
             DebugLog.log(
                 "T4A-scrape",
-                "ep $singleNumber: __PROPS__ missing/unparsed (len=${html.length}, hasProps=$hasProps) â€” DOM fallback",
+                "ep $singleNumber: __PROPS__ missing/unparsed (len=${html.length}, hasProps=$hasProps) - DOM fallback",
             )
             // React DOM fallback (JSON shape changed / not embedded).
             val fromDom = domEpisode(html, url, singleNumber)

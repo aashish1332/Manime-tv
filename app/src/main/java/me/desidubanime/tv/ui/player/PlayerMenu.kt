@@ -77,7 +77,7 @@ fun PlayerMenu(
     onSubtitleShifted: () -> Unit,
 ) {
     // Without an explicit focus grab the d-pad stays stuck on the video surface
-    // and the menu is unusable ("up/down/ok chalna bnd ho gye" bug).
+    // and the menu is unusable (up/down/OK stopped responding).
     val closeFocus = remember { FocusRequester() }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

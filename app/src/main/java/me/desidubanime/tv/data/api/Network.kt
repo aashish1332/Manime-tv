@@ -138,9 +138,11 @@ object Network {
         .dispatcher(Dispatcher().apply {
             // Deliberately small. These sweeps have no deadline — they only
             // need to finish eventually, and every slot they take is bandwidth
-            // the foreground could have used.
-            maxRequests = 6
-            maxRequestsPerHost = 3
+            // the foreground could have used. Two per host (was three): each
+            // in-flight page is also a Jsoup parse on a 4-core TV box, and the
+            // sweep already breathes between pages.
+            maxRequests = 4
+            maxRequestsPerHost = 2
         })
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)

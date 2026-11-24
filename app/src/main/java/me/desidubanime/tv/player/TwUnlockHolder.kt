@@ -18,7 +18,7 @@ object TwUnlockHolder {
         at = System.currentTimeMillis()
     }
 
-    /** Sirf isi anime ke liye valid — mismatch par clear ho jata hai. */
+    /** Valid for this anime only — cleared when the anime id does not match. */
     fun take(forAnimeId: Int): String? {
         val u = url ?: return null
         if (System.currentTimeMillis() - at > TTL_MS || animeId != forAnimeId) {

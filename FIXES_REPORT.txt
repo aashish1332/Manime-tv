@@ -1,5 +1,5 @@
 ================================================================
-DESIDUBANIME TV — FIXES REPORT (latest update: 2026-08-08 #4)
+DESIDUBANIME TV — FIXES REPORT (latest update: 2026-11-24 #9)
 ================================================================
 Yeh file batati hai ki is project me kya-kya fix hua, kya nahi
 hua, aur kyu. Har fix ka technical reason bhi likha hai.
@@ -7,6 +7,316 @@ hua, aur kyu. Har fix ka technical reason bhi likha hai.
 APK: app/build/outputs/apk/debug/app-debug.apk
   Last build: 2026-08-08 (BUILD SUCCESSFUL, ~22.8 MB, debug)
   Build command: gradlew.bat :app:assembleDebug --no-daemon
+
+================================================================
+SECTION 00004 - 2026-11-24 SESSION #9 (post-feed stutter, GDFlix,
+                                 FilePress, ToonWorld4All, v1.2.1)
+================================================================
+Reported: the app still stutters right after opening (while the feed
+refreshes); GDFlix said "no stream" 2-3s after it was picked; FilePress
+hung on loading; confirm ToonWorld4All works with no QR and no ads and
+at the same speed as animedubhindi.link; check how vega-tv providers
+work (read-only); then ship an update.
+
+00004A. THE POST-FEED BACKGROUND STORM (the real stutter)
+  startBackgroundWork() fired the moment the first feed landed: the
+  three full catalogs immediately, the ~600-page slug sweep behind the
+  ADH one, and the title sweep 4s later. That is precisely when the grid
+  is binding ~30 posters and the viewer starts moving the focus ring -
+  and every one of those jobs is an HTML fetch plus a Jsoup parse on the
+  same cores the renderer needs.
+  Now: 10s dead time after the first feed (BACKGROUND_SETTLE_MS), then
+  InteractionGate.awaitQuiet(2s) before the catalogs start, and the slug
+  sweep waits for quiet AGAIN before its first page. The title sweep
+  moved from 4s to 30s. Sweeps breathe 250ms between pages (was 120ms)
+  and the bulk lane dropped to 4 requests / 2 per host (was 6/3).
+  The feed re-merge that lands after a catalog is now debounced 6s (was
+  2.5s) and also waits for the app to be idle - it swaps the whole grid,
+  so it must not land mid-scroll.
+  InteractionGate gained awaitQuiet(quietMs): it suspends until nothing
+  has been in flight for that long, bounded at 90s so a sweep can never
+  be parked forever.
+
+00004B. GDFLIX - VERIFIED LIVE, AND MOVED BACK INTO THE FAST PASS
+  End-to-end test against a real ADH link (gdflix.vip/file/<id>), done
+  with curl only, no browser:
+    GET  gdflix.vip/file/<id>  302 -> new10.gdflix.io, 200, 43KB, 3.7s,
+                                 no Cloudflare challenge, key present
+    POST new10.gdflix.io/mfile/<id>  action=instant + key + action_token
+         header x-token: new10.gdflix.io
+         -> {"error":false,"url":"https://video-downloads.googleusercontent…"}
+                                 in 0.9s
+  i.e. the plain-HTTP protocol in gdflixInstant() is correct today.
+  Two changes made it actually get used:
+   - autoResolve() used to hold GDFlix back for a browser-unlock round
+     (isGatedHoster). GDFlix is not gated any more, so every hub now gets
+     the fast plain-HTTP pass first and the browser is only a second
+     chance.
+   - the instant stage's slice went 8s -> 12s (the 3.7s page fetch was
+     being killed on slow boxes and then paid for twice by the fallback),
+     plain HTTP 10s -> 8s.
+
+00004C. FILEPRESS - THE ORIGIN IS GONE, SO FAIL IN A SECOND
+  Live: fpgo.xyz and filepress.baby both 301 to new4.filepress.lat, and
+  that host blackholes connections (DNS answers 49.44.79.236, every
+  connect stalls 20s+, HTTP and HTTPS, IPv4 and IPv6). This is a
+  site-side outage, not an app bug - but the app paid for it three times
+  per pick (alias fetch, fallback API, browser) before showing anything.
+  filepressFetch() now resolves the alias with a 6s cap, remembers the
+  origin for 30 min, and marks FilePress DOWN for 5 min on a connection
+  failure; resolve() then returns null immediately, so the player moves
+  to the next server instead of sitting on the spinner. Repeat picks in
+  the same session skip the alias hop entirely.
+
+00004D. TOONWORLD4ALL - NO QR, NO ADS, SAME SPEED
+  Verified with curl against a real episode (blue-box-2x6):
+    episode page         200, 29KB, 1.4s
+    /redirect/<token>    200, 13.9KB, 1.3s
+    __PROPS__ inside it:  "domain":"https://gdflix.dev/file/" +
+                          "hidden":"o97e5vr7jwwitka"  (no ad, no QR)
+  That is exactly the path FileHostResolver already takes (redirect ->
+  target -> right hoster resolver), and the target resolves with the
+  GDFlix flow above. For comparison, animedubhindi's adhlinks episode
+  page answered in 1.65s and its home page in 2.0s, ToonWorld's home in
+  2.5s - the same class of latency, so speed is not the issue.
+  A MEGA row is a download-only host and is still filtered out of the
+  server list, so it can never open the QR sheet.
+  The hint that told viewers to go solve 3 ads on their phone is gone:
+  it now points at the HubCloud/GDFlix rows instead.
+
+00004E. HOW VEGA-TV DOES PROVIDERS (read-only, nothing touched)
+  Its provider layer is a JS sandbox: provider bundles run in one hidden
+  WebView (cheerio bundled, fetch/axios/kv shims), and every network
+  call goes through a native OkHttp bridge (ProviderHttp) because the
+  WebView page is CORS-bound. Cookies live in the process-wide
+  CookieManager shared with a visible WebView that solves Cloudflare
+  challenges, and streams are handed to the player WITH that jar as a
+  Cookie header - the same idea FileHostResolver already uses via
+  browser.cookiesFor(). It also rate-limits per host and serialises
+  invokes. Nothing in that design applies to this app's fixed set of
+  four sources; the reusable parts (shared cookie jar, stream headers,
+  one invoke at a time) are already present here.
+
+================================================================
+SECTION 00003 — 2026-11-24 SESSION #8 (startup stutter, spinner,
+                                 GDFlix/FilePress, English-only UI)
+================================================================
+Reported: app still lags/stutters after opening (while refreshing);
+GDFlix says "no stream" 2-3s after picking it; FilePress stuck on
+loading; remove Hinglish; the loading circle does not rotate.
+
+00003A. WHY THE SPINNER NEVER ROTATED
+  All four spinners were Material3 CircularProgressIndicator, which
+  animates through rememberInfiniteTransition. Compose scales that by
+  the platform MotionDurationScale; on boxes with "Animator duration
+  scale" = 0 (common on Android TV, and a developer setting) the factor
+  is 0 and an INFINITE transition does not advance at all. The arc was
+  drawn and then frozen — exactly the report.
+  New ui/common/Spinner.kt draws a 270-degree arc whose angle is
+  computed from the frame clock's timestamps (withFrameNanos), which the
+  duration scale does not touch. It suspends between frames, so it costs
+  nothing in the background and cannot drift on a busy device.
+  Replaced all four usages: LoadingScreen, sidebar refresh, search, and
+  the player's loading + buffering overlay.
+
+00003B. GDFLIX "no stream" AFTER 2-3s — THE BUDGET WAS EATEN
+  The GDFlix branch ran 20s (instant path) + 30s (plain HTTP) + a
+  3 x 120s browser retry loop. The caller gives 45s (MANUAL_RESOLVE_MS),
+  so the outer timeout killed the resolve during the browser stage — the
+  only stage that can beat Cloudflare. GDFlix therefore could not
+  succeed, and the failure message showed up almost immediately.
+  Now every stage gets a slice of the caller's budget (8s instant, 10s
+  plain, the remainder to ONE browser capture capped at BROWSER_CAP_MS)
+  and checks the remaining time before starting. The 3 x 120s loop is
+  gone; it could never finish inside any budget.
+
+00003C. FILEPRESS "stuck on loading" — THE BROWSER OPENED THE WRONG PAGE
+  The resolve identifies the real FilePress page (filepressPageUrl) and
+  used it for the API calls, but the browser click-capture step below
+  still opened the ORIGINAL pageUrl — the adhlinks/interstitial page.
+  A page with no download button can only time out, so the player sat on
+  "loading" until the caller's timeout fired.
+  browserPageUrl now carries the identified page into the browser step,
+  and the two API stages are budget-capped (12s / 10s) instead of the
+  fixed 20s + 25s that could exceed the caller's budget on their own.
+
+00003D. STARTUP STUTTER
+  Two concrete causes removed:
+  1. App.onCreate blocked the MAIN THREAD with runBlocking { settings
+     .ddaBase() }. The first DataStore read is disk I/O and it ran before
+     the first frame. It now happens inside the launch coroutine, ahead
+     of the first request — WpService resolves Api.HOST per call, so
+     nothing needs it earlier.
+  2. HomeViewModel published a new UiState on every load and re-merge.
+     The first seconds after launch produce the cached feed, the network
+     feed, and a re-merge each time a source catalog lands; every one of
+     those recomposed the whole grid and re-bound ~30 posters in Coil.
+     publish() now compares structurally and skips identical feeds
+     (HomeFeed/Anime are data classes).
+  NOT measured on a device — there is no adb here. These are code-level
+  causes removed, not a measured speedup.
+
+00003E. HINGLISH REMOVED
+  User-facing strings:
+    "Is page pe kuch nahi mila."  ->  "No anime found on that page."
+    "... se stream nahi mila - dusra server chuno."  ->
+      "... returned no stream - pick another server."
+  Hinglish comments translated in PlayerViewModel, FileHostBrowser,
+  TwUnlockHolder, PlayerMenu and AnimeRepository. Three log lines that
+  rendered as mojibake in the on-screen server log now use ASCII.
+
+00003F. VERIFY
+  OK  :app:compileDebugKotlin BUILD SUCCESSFUL
+  OK  :app:searchCheck — 19/19 checks still pass
+  NAHI Device-level: no adb and no TV box on this machine. Spinner
+       rotation, GDFlix and FilePress resolution were NOT exercised at
+       runtime; they are fixed from the code paths, not from a trace.
+
+================================================================
+SECTION 00002 — 2026-11-24 SESSION #7 (search: accuracy + speed)
+================================================================
+User: "make sure Search works accurately and fast".
+
+00002A. PEHLE KYA GALAT THA — ACCURACY
+  Chaaron sites WordPress search use karte hain, aur WP ka `search`
+  parameter TITLE ke saath post ka CONTENT bhi match karta hai. Isliye
+  ek show dhoondhne par aise anime bhi aate the jinke synopsis me wo
+  shabd hai, aur result RECENCY order me aata tha — sahi show kabhi
+  teesre-chauthe card par. Local catalog scan bhi poore query ka
+  substring (`contains`) dekhta tha, isliye:
+    "slime reincarnated" -> 0 (word order ulta)
+    "slimee" (typo)      -> 0
+  code ka comment typo coverage ka dawa karta tha; tha hi nahi.
+
+00002B. AB KYA HOTA HAI — RANKING (rankSearch)
+  Merge ke baad har card ko uske TITLE par tier milta hai:
+    5 = exact        ("naruto" == "Naruto")
+    4 = starts with
+    3 = contains
+    2 = saare query words title me, kisi bhi order me
+    1 = ek typo door (insert/delete/substitute/swap, 4+ letters)
+    0 = sirf content match
+  Tier 5..1 order karte hain, tie par recency (latestEpisodeAt /
+  updatedAt / publishedAt). Tier 0 tabhi dikhta hai jab koi bhi
+  title match na mile — recall chupchaap nahi girti, sirf tab demote
+  hoti hai jab asli title match maujood ho.
+
+00002C. CATALOG SCAN AB TITLE-AWARE
+  adhCatalog / adCatalog / twCatalog memory me hote hain, to ab wahi
+  rules un par bhi chalte hain (network zero). Yahi hissa tab bhi
+  kaam karta hai jab site ka apna search down ho, rate-limited ho, ya
+  uske 20 slots content matches se bhar jayein. 3 se chhote query par
+  scan nahi chalta.
+  TYPO PASS GATED HAI: pehle sirf strict tiers (exact / prefix /
+  contains / word-order) check hote hain — catalog par, network
+  results par, aur DDA results par. Agar kuch bhi strict match na mile
+  (aur query 4+ harf ki ho) TABHI poora catalog fuzzy scan hota hai.
+  Yaani jis key press ka jawab pehle se maujood hai wo low-RAM box par
+  catalog scan ka bojh nahi uthata; scan sirf us dead-end par chalta
+  hai jahan user "No results" dekh raha hota hai. Result ranking me
+  bhi typo pass tabhi chalta hai jab list me koi strict title match na
+  ho.
+
+00002D. SPEED
+  - Per-query cache: normalized query -> results, 3 min TTL, 12-entry
+    LRU. Back-navigation aur detail ka season switcher (base naam se
+    search karta hai) dobara chaar sites nahi chhedte. KHAALI result
+    cache nahi hota — site hiccup 3 min tak "aisa anime hai hi nahi"
+    jaisa na dikhe.
+  - Merge ab Network.feed lane par: adhlinks HTML lookups 20 se 6
+    (FEED_SLUG_LOOKUPS); baaki background slug sweep uthata hai.
+  - 400ms debounce + stale-result guard (SearchViewModel) jaise the.
+  - Empty-state copy update: pehle likha tha "sites match on the
+    start of the title", jo ab galat tha.
+
+00002E. VERIFY — KYA HUA, KYA NAHI
+  Match logic ab alag file me hai (util/SearchMatch.kt — koi Android
+  type nahi) taaki usse standalone check kiya ja sake:
+    app/src/debug/java/me/desidubanime/tv/tools/SearchMatchCheck.kt
+      (debug-only source set: release APK me nahi jaata, aur module me
+       koi test dependency nahi hai isliye JUnit ki zaroorat nahi)
+    run: gradlew.bat --init-script tools/search_check/check.init.gradle
+         :app:searchCheck
+  Result: PASS — 19/19 checks:
+    tiers      exact/prefix/contains/word-order sahi, "naruto" /
+               "Naruto" exact, "Naruto Shippuden" prefix,
+               "Boruto: Naruto Next..." contains,
+               "slime reincarnated" -> full title match
+    k-on       "k-on" aur "k on" dono "K-On!" par EXACT
+    typos      "slmie" (swap), "slimee" (insert), "slim" (delete),
+               "slmie reincarnated" -> sab ek hi tier; "bleach" reject
+    noise      "solo"/"sora" reject (chhote shabd), "naruto"/"sasuke"
+               reject
+    order      Naruto > Naruto Shippuden > Boruto: Naruto... > Bleach
+               drop (tier desc, recency tiebreak)
+  OK  :app:compileDebugKotlin BUILD SUCCESSFUL (check task isi par
+      depend karta hai, yaani wahi compile chala)
+  NAHI Runtime search behaviour device par nahi dekha (is machine par
+       adb/device nahi). www.desidubanime.me yahan Cloudflare managed
+       challenge (403) deta hai, isliye DDA ke live endpoints bhi
+       curl se verify nahi ho sakte.
+
+================================================================
+SECTION 00001 — 2026-11-23 SESSION #6 (incremental feed refresh)
+================================================================
+User: refresh par sirf NAYE anime check hone chahiye, poora catalog
+dobara build nahi; kuch naya na ho to rebuild hi skip. Badges aur
+cold-start cache jaise the waise chalte rahen.
+
+00001A. PEHLE KYA HOTA THA
+  refreshHomeFeed() seedha feedCache = null karta tha aur pura build
+  chalata tha: DDA anime + episode feed + ADH/AD/TW catalogs, teen
+  merges, duplicate collapse, 120-card JSON write. Sab kuch tab bhi,
+  jab 30 second me kuch bhi naya nahi hua tha.
+
+00001B. AB KYA HOTA HAI
+  Har successful build apna "kit tak cover kiya" stamp save karta hai
+  (FeedCursor: DDA newest modified, newest episode date, aur teen
+  scraped sites ka newest modified). Refresh pe pehle ek probe chalta
+  hai:
+    - DDA anime: 1-item collection, orderby=modified  -> modified
+    - DDA episodes: 1-item, orderby=date              -> date
+    - ADH/AD/TW: memory me pada latest window ka max modified
+  Sab stamps purane cursor se barabar/chhote -> "kuch naya nahi":
+  cache waisa hi wapas, koi merge nahi, koi network catalog nahi.
+  Kuch naya -> purana full merge (partial merge se duplicate cards aur
+  aadhe badges aate hain, isliye us case me wahi chalna chahiye).
+
+00001C. `modified_after` / `after` KYU NAHI — LIVE MEASURED ❌
+  WordPress REST ka "since" filter plan tha, par live test (asli
+  wordpress.org/news REST, HTTP 200):
+    ?modified_after=2030-01-01  -> []            (honor hua)
+    ?after=2030-01-01           -> poora list     (IGNORE hua!)
+  Yaani non-editor post type par param chup-chaap ignore hota hai,
+  list poori aati hai, probe hamesha "naya hai" bolta aur refresh
+  har baar rebuild karta — feature kuch bhi na karta. Isliye ab
+  orderby + 1 item wala signal hai, jo aise fail nahi sakta, aur
+  edits bhi pakadta hai (edit se modified badalta hai -> newest row).
+  Live size: 47 bytes (anime), 174 bytes (episode).
+
+00001D. SAFETY (deliberate)
+  - Request FAIL hone par probe "changed" bolta hai, "unchanged"
+    nahi. DDA Cloudflare ke peeche hai: 403 + HTML ko "kuch naya
+    nahi" samajhna feed ko hamesha ke liye stale kar deta. (Isi
+    session me ye bug pakda gaya aur fix hua.)
+  - Cursor disk se har refresh pe padha jata hai, memory me nahi
+    rakha: feedCache kai jagah null hota hai (ADH domain change,
+    settings reset) — bacha hua cursor purane feed ke baare me
+    "kuch naya nahi" bol deta.
+  - Badges: no-change path cached cards ko chhua bhi nahi karta;
+    sourcesResolved/source ids waise hi rehte hain. Change path
+    purana hi merge chalata hai, to badge logic bilkul same.
+  - Cold start: cachedFeed()/homeFeed() bilkul unchanged.
+  - Low-RAM: probe 2 chhoti requests + memory ke stamps; koi
+    catalog copy/parse nahi. Rebuild tabhi jab zaroorat ho.
+
+00001E. VERIFY STATUS
+  Compile: :app:compileDebugKotlin BUILD SUCCESSFUL.
+  Live: 1-item query shape asli WordPress par 200 + 47/174 bytes.
+  NOTE: www.desidubanime.me is machine se Cloudflare managed
+  challenge (403) de raha hai, isliye asli site par probe ke exact
+  stamps live verify nahi ho paaye. Isliye design hi param par
+  depend nahi karta. TV/device par runtime test nahi hua.
 
 ================================================================
 SECTION 00000 — 2026-11-23 SESSION #5 (live-verified)

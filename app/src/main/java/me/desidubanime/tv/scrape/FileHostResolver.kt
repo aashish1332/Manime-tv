@@ -247,41 +247,56 @@ object FileHostResolver {
             // and the JSON answer carries the final CDN URL. Two requests, no
             // browser, no challenge — the legacy multi-step crawl below stays
             // only as a fallback for older/odd uploads.
-            kotlinx.coroutines.withTimeoutOrNull(20_000L) { gdflixInstant(pageUrl) }?.let {
-                DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
-                return@withContext it
+            // Every stage is capped to a SLICE of the budget the caller gave us.
+            //
+            // This used to run 20s + 30s + three 120s browser captures back to
+            // back, all inside a caller budget of 45s. The outer timeout killed
+            // the resolve during the browser stage — the only stage that can
+            // beat Cloudflare — so GDFlix never had a chance to succeed, and the
+            // player displayed its failure message seconds later. A manual pick
+            // now spends the budget where it can actually pay off.
+            // The PAGE fetch is the expensive half of this stage (live: ~3.7s
+            // for a 43KB page, and a TV's WebView-free HTTP stack is slower),
+            // so it gets the larger slice. Killing it at 8s meant the proven
+            // path never finished on a slow box and the cost was paid twice by
+            // the plain-HTTP fallback below.
+            val instantBudget = msLeft(deadline).coerceAtMost(12_000L)
+            if (instantBudget >= 1_000L) {
+                kotlinx.coroutines.withTimeoutOrNull(instantBudget) { gdflixInstant(pageUrl) }?.let {
+                    DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
+                    return@withContext it
+                }
             }
             try {
-                // Try plain-HTTP with longer timeout; sometimes Cloudflare takes a moment
-                kotlinx.coroutines.withTimeoutOrNull(30_000L) { gdflixPlainHttp(pageUrl) }?.let {
-                    DebugLog.log("resolve", "GDFlix plain-HTTP OK -> ${short(it.url)}")
-                    return@withContext it
+                val plainBudget = msLeft(deadline).coerceAtMost(8_000L)
+                if (plainBudget >= 1_000L) {
+                    kotlinx.coroutines.withTimeoutOrNull(plainBudget) { gdflixPlainHttp(pageUrl) }?.let {
+                        DebugLog.log("resolve", "GDFlix plain-HTTP OK -> ${short(it.url)}")
+                        return@withContext it
+                    }
                 }
             } catch (e: Exception) {
                 DebugLog.log("resolve", "GDFlix plain-HTTP crashed: ${e.javaClass.simpleName} - ${e.message}")
             }
             DebugLog.log("resolve", "GDFlix plain-HTTP found nothing, falling back to browser")
-            // Immediately fallback to browser if available; retry a few times if needed
+            // ONE browser attempt, sized to the budget that is actually left.
+            // The old 3 x 120s retry loop could not finish inside any caller
+            // budget, so its retries only ever produced a longer spinner; the
+            // generic click-capture step below is the real second chance.
             if (browser != null) {
-                var retries = 0
-                while (retries < 3) {
-                    val direct = try {
-                        runCatching { browser.directUrl(pageUrl, 120_000L) }.getOrNull()
-                    } catch (e: Exception) {
-                        DebugLog.log("resolve", "GDFlix browser crash (attempt ${retries+1}): ${e.javaClass.simpleName} - ${e.message}")
-                        null
-                    }
+                val leftForBrowser = msLeft(deadline)
+                if (leftForBrowser >= MIN_BROWSER_MS) {
+                    val direct = runCatching {
+                        browser.directUrl(pageUrl, leftForBrowser.coerceAtMost(BROWSER_CAP_MS))
+                    }.getOrNull()
                     if (direct != null) {
                         DebugLog.log("resolve", "GDFlix browser captured: ${short(direct)}")
                         return@withContext stream(direct, browser)
                     }
-                    retries++
-                    if (retries < 3) {
-                        DebugLog.log("resolve", "GDFlix browser attempt $retries failed, retrying after 2s...")
-                        kotlinx.coroutines.delay(2000L)
-                    }
+                    DebugLog.log("resolve", "GDFlix browser captured nothing")
+                } else {
+                    DebugLog.log("resolve", "GDFlix no budget left for the browser (${leftForBrowser}ms)")
                 }
-                DebugLog.log("resolve", "GDFlix browser all retries exhausted")
             }
             DebugLog.log("resolve", "GDFlix resolution failed")
         }
@@ -290,6 +305,12 @@ object FileHostResolver {
         // the drive URL back. Replicate the "initial" phase (no captcha) for
         // each promising method; any CF wall falls through to the browser.
         var skipPlainCrawl = false
+        // The page the browser must open later. FilePress/FileBee hand out an SPA
+        // link that is NOT the URL the caller passed (that one is the adhlinks or
+        // interstitial page), and the browser step used to open the WRONG page —
+        // it then sat out its whole budget on a page with no download button and
+        // the player stayed on "loading" until the caller's timeout fired.
+        var browserPageUrl = pageUrl
         if (hoster.contains("filepress", true) ||
             hoster.contains("filebee", true) ||
             pageUrl.contains("fpgo.", true) ||
@@ -323,13 +344,32 @@ object FileHostResolver {
             // CURRENT protocol first (verified live): the domain's own
             // `/api` proxy, no Cloudflare. The old api.filebee.xyz call below
             // is kept only as a fallback for anything that still answers it.
-            kotlinx.coroutines.withTimeoutOrNull(20_000L) { filepressApi(pageUrl) }?.let {
-                DebugLog.log("resolve", "FilePress API OK -> ${short(it.url)}")
-                return@withContext it
+            // Later stages must open the page we actually identified.
+            browserPageUrl = filepressPageUrl
+            // A DEAD ORIGIN IS NOT A SLOW ONE. FilePress aliases 301 to a
+            // numbered host (newN.filepress.lat); when that host is gone it
+            // blackholes every connection for 20s+ instead of refusing, so the
+            // API stages, the fallback API and finally the browser all sat on
+            // the spinner in turn — the "FilePress stuck on loading" report.
+            // One short probe already told us it is down; fail in ~0ms and let
+            // the player move to the next server.
+            if (filepressDown()) {
+                DebugLog.log("resolve", "FilePress origin marked down — skipping (site unreachable)")
+                return@withContext null
             }
-            kotlinx.coroutines.withTimeoutOrNull(25_000L) { filebeePlainHttp(filepressPageUrl) }?.let {
-                DebugLog.log("resolve", "FileBee API OK -> ${short(it.url)}")
-                return@withContext it
+            val apiBudget = msLeft(deadline).coerceAtMost(12_000L)
+            if (apiBudget >= 1_000L) {
+                kotlinx.coroutines.withTimeoutOrNull(apiBudget) { filepressApi(filepressPageUrl) }?.let {
+                    DebugLog.log("resolve", "FilePress API OK -> ${short(it.url)}")
+                    return@withContext it
+                }
+            }
+            val filebeeBudget = msLeft(deadline).coerceAtMost(FILEBEE_STAGE_MS)
+            if (filebeeBudget >= 1_000L) {
+                kotlinx.coroutines.withTimeoutOrNull(filebeeBudget) { filebeePlainHttp(filepressPageUrl) }?.let {
+                    DebugLog.log("resolve", "FileBee API OK -> ${short(it.url)}")
+                    return@withContext it
+                }
             }
             DebugLog.log("resolve", "FileBee API found nothing")
             // Skip plain HTTP crawl for FilePress/FileBee because their SPA link is only
@@ -361,7 +401,7 @@ object FileHostResolver {
         DebugLog.log("resolve", "browser click-capture starting (${left}ms left)")
         if (left >= MIN_BROWSER_MS) {
             val direct = try {
-                runCatching { browser.directUrl(pageUrl, left.coerceAtMost(BROWSER_CAP_MS)) }.getOrNull()
+                runCatching { browser.directUrl(browserPageUrl, left.coerceAtMost(BROWSER_CAP_MS)) }.getOrNull()
             } catch (e: Exception) {
                 DebugLog.log("resolve", "browser crash: ${e.javaClass.simpleName} - ${e.message}")
                 null
@@ -421,6 +461,10 @@ object FileHostResolver {
     /** Keep log lines readable — these URLs are enormous. */
     private fun short(url: String): String =
         if (url.length <= 78) url else url.take(60) + "…" + url.takeLast(15)
+
+    /** Milliseconds left before [deadline] (never negative). */
+    private fun msLeft(deadline: Long): Long =
+        (deadline - System.currentTimeMillis()).coerceAtLeast(0L)
 
     /** GDFlix's minting endpoint (rotates rarely; both hosts answer the same shape). */
     private const val XTROCDN_API = "https://xtrocdn.zencloud.lol/api"
@@ -1481,15 +1525,72 @@ object FileHostResolver {
      *
      * Note the backend's own spelling: "downlaod".
      */
+    /**
+     * The LIVE origin behind a FilePress/FileBee alias, fetched with a SHORT
+     * timeout and remembered per session.
+     *
+     * fpgo.xyz / filepress.baby 301 to a numbered host (newN.filepress.lat).
+     * While that host is alive this is one cheap redirect; while it is not, a
+     * plain `fetchFollowing` waits out the full 18s call timeout on every
+     * attempt. This probe gives it [FILEPRESS_PROBE_MS] instead, and records
+     * "down" so repeated picks (and the browser fallback behind them) are
+     * skipped rather than re-waited.
+     */
+    private fun filepressFetch(pageUrl: String): Pair<String, String>? {
+        val quick = probeClient.newBuilder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .callTimeout(FILEPRESS_PROBE_MS, TimeUnit.MILLISECONDS)
+            .build()
+        val req = Request.Builder()
+            .url(pageUrl)
+            .header("User-Agent", Api.USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml,*/*")
+            .build()
+        return try {
+            quick.newCall(req).execute().use { resp ->
+                val finalUrl = resp.request.url.toString()
+                val origin = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1)
+                if (origin == null) {
+                    markFilepressDown("no origin for ${short(finalUrl)}")
+                    return null
+                }
+                filepressOrigin = origin
+                filepressOriginAt = System.currentTimeMillis()
+                val body = if (resp.isSuccessful) readCapped(resp) else null
+                if (body == null) {
+                    DebugLog.log("filepress", "origin ${short(origin)} answered ${resp.code}")
+                }
+                Pair(finalUrl, body.orEmpty())
+            }
+        } catch (e: Exception) {
+            // Refused / TLS stall / read timeout: the numbered origin is gone.
+            markFilepressDown("${e.javaClass.simpleName} ${short(pageUrl)}")
+            null
+        }
+    }
+
     private suspend fun filepressApi(pageUrl: String): Playable.Stream? = withContext(Dispatchers.IO) {
         val slug = pageUrl.substringBefore('?').trimEnd('/').substringAfterLast('/')
         if (slug.isBlank() || slug.length < 6) return@withContext null
         // filebee.live / fpgo.xyz are ALIASES: the page 302s to
         // newN.filepress.lat, and `/api` only exists on that final origin.
-        val fetched = fetchFollowing(pageUrl) ?: return@withContext null
-        val origin = Regex("""^(https?://[^/]+)""").find(fetched.first)?.groupValues?.get(1)
-            ?: return@withContext null
-        if (looksLikeChallenge(fetched.second)) return@withContext null
+        //
+        // The origin is all this stage needs — the SPA's HTML is never parsed
+        // here. So once one pick has named it, later picks skip the alias hop
+        // (and its page download) entirely and call `/api` directly.
+        val cachedOrigin = cachedFilepressOrigin()
+        val origin: String
+        if (cachedOrigin != null) {
+            origin = cachedOrigin
+            DebugLog.log("filepress", "origin cached -> ${short(origin)}")
+        } else {
+            val fetched = filepressFetch(pageUrl) ?: return@withContext null
+            if (fetched.second.isBlank()) return@withContext null
+            if (looksLikeChallenge(fetched.second)) return@withContext null
+            origin = Regex("""^(https?://[^/]+)""").find(fetched.first)?.groupValues?.get(1)
+                ?: return@withContext null
+        }
         val api = "$origin/api"
         val info = runCatching {
             probeClient.newCall(
@@ -1625,6 +1726,47 @@ object FileHostResolver {
 
     /** Budget for one crawl of a minted gdflix link. */
     private const val GDFLIX_CRAWL_MS = 12_000L
+
+    /** How long the FilePress alias may take to name its origin before we call it dead. */
+    private const val FILEPRESS_PROBE_MS = 6_000L
+
+    /** Fallback FileBee API (different backend, often gone) — never worth 10s. */
+    private const val FILEBEE_STAGE_MS = 6_000L
+
+    /** A host declared down is skipped for this long before it is probed again. */
+    private const val FILEPRESS_DOWN_TTL_MS = 5 * 60_000L
+
+    /** An origin is reused for this long; the alias rotates rarely. */
+    private const val FILEPRESS_ORIGIN_TTL_MS = 30 * 60_000L
+
+    /** Origin last resolved for a FilePress alias (see [filepressFetch]). */
+    @Volatile
+    private var filepressOrigin: String? = null
+
+    @Volatile
+    private var filepressOriginAt = 0L
+
+    /** Millis until which FilePress is known unreachable. */
+    @Volatile
+    private var filepressDownUntil = 0L
+
+    private fun filepressDown(): Boolean =
+        System.currentTimeMillis() < filepressDownUntil
+
+    private fun markFilepressDown(reason: String) {
+        filepressDownUntil = System.currentTimeMillis() + FILEPRESS_DOWN_TTL_MS
+        DebugLog.log(
+            "filepress",
+            "origin unreachable ($reason) — skipping FilePress for ${FILEPRESS_DOWN_TTL_MS / 1000}s",
+        )
+    }
+
+    /** The origin learned this session, if it is still fresh. */
+    private fun cachedFilepressOrigin(): String? {
+        val origin = filepressOrigin ?: return null
+        if (System.currentTimeMillis() - filepressOriginAt > FILEPRESS_ORIGIN_TTL_MS) return null
+        return origin
+    }
 
     /** FileBee delivery methods that return a direct URL without captcha. */
     private val FILEBEE_METHODS = listOf(

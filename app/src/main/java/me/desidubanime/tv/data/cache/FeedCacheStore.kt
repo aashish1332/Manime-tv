@@ -9,13 +9,42 @@ import me.desidubanime.tv.data.model.HomeFeed
 import java.io.File
 
 /**
+ * What the last successful feed build already covered.
+ *
+ * The feed merges four sites, and one of them (DDA) is a REST API that can
+ * answer "what changed since …" itself. Remembering the newest stamp each
+ * source contributed turns a refresh into two small REST calls plus a few
+ * string comparisons instead of re-downloading and re-merging every catalog.
+ *
+ * Stamps are kept as the sites' own ISO strings, not parsed dates: this app
+ * already orders by those strings everywhere, and comparing them needs no
+ * timezone guessing or date parser on a set-top box.
+ */
+@Serializable
+data class FeedCursor(
+    /** Newest DDA `modified` in the last build (feeds `modified_after`). */
+    val ddaModified: String = "",
+    /** Newest DDA episode `date` in the last build (feeds `after`). */
+    val episodeDate: String = "",
+    val adhModified: String = "",
+    val adModified: String = "",
+    val twModified: String = "",
+    /** 0 = no build yet, which forces a full rebuild. */
+    val savedAt: Long = 0L,
+)
+
+/**
  * Last successful home feed, persisted as one JSON file. On a cold start the
  * home screen renders from this instantly (posters come from Coil's disk
  * cache) while the fresh feed loads behind it — the TV equivalent of
  * stale-while-revalidate. Losing it is harmless; it regenerates on next load.
+ *
+ * The build's coverage is stored beside it ([FeedCursor]) so a refresh can ask
+ * "is anything new?" before doing any merge work.
  */
 class FeedCacheStore(context: Context) {
     private val file = File(context.filesDir, "home_feed.json")
+    private val cursorFile = File(context.filesDir, "home_feed.cursor")
     private val json = Json { ignoreUnknownKeys = true }
 
     fun load(): HomeFeed? = try {
@@ -30,8 +59,28 @@ class FeedCacheStore(context: Context) {
     fun clear() {
         try {
             if (file.exists()) file.delete()
+            // The cursor describes a feed that no longer exists; keeping it
+            // would let a refresh conclude "nothing new" against a build the
+            // app just discarded.
+            if (cursorFile.exists()) cursorFile.delete()
         } catch (e: Exception) {
             // Best-effort.
+        }
+    }
+
+    /** Coverage of the last successful build, or null when there is none. */
+    fun loadCursor(): FeedCursor? = try {
+        if (cursorFile.exists()) json.decodeFromString<FeedCursor>(cursorFile.readText())
+        else null
+    } catch (e: Exception) {
+        null
+    }
+
+    fun saveCursor(cursor: FeedCursor) {
+        try {
+            cursorFile.writeText(json.encodeToString(cursor))
+        } catch (e: Exception) {
+            // Best-effort: without it the next refresh is a full rebuild.
         }
     }
 

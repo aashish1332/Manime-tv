@@ -42,6 +42,7 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import me.desidubanime.tv.data.model.Anime
 import me.desidubanime.tv.ui.common.AnimeCard
+import me.desidubanime.tv.ui.common.Spinner
 import me.desidubanime.tv.ui.common.UiState
 import me.desidubanime.tv.ui.theme.Primary
 
@@ -116,7 +117,7 @@ fun SearchScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(top = 8.dp),
                 ) {
-                    androidx.compose.material3.CircularProgressIndicator(
+                    Spinner(
                         modifier = Modifier.size(22.dp),
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.primary,
@@ -155,8 +156,8 @@ fun SearchScreen(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            "Check the spelling, or try fewer words — the sites match on " +
-                                "the start of the title.",
+                            "Try fewer words, or just one — titles are matched on any " +
+                                "word order and small typos are tolerated.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp, bottom = 12.dp),

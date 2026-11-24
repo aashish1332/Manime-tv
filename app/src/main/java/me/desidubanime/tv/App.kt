@@ -14,19 +14,24 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         installCrashHandler()
-        // Apply the saved DDA base URL before anything builds Retrofit/OkHttp
-        // against Api.HOST. One tiny DataStore read — a few ms at cold start.
-        kotlinx.coroutines.runBlocking {
-            me.desidubanime.tv.data.api.Api.setHost(
-                me.desidubanime.tv.data.ServiceLocator.settings.ddaBase(),
-            )
-        }
         // Start the launch feed NOW instead of after the splash + first Home
         // composition. The fetch (or the cached feed it warms) is ready by the
         // time Home appears, and HomeViewModel's own load() joins the same
         // in-flight fetch rather than starting a second one. The app always
         // refreshes on start — this just removes the dead wait before it does.
+        //
+        // The saved DDA host is read INSIDE this coroutine, not with runBlocking
+        // on the main thread. The first DataStore read is disk I/O, and blocking
+        // the UI thread on it delayed the very first frame — one of the reasons
+        // the app felt sticky right after opening. Nothing needs the host before
+        // a request is made: WpService's interceptor resolves Api.HOST per call,
+        // and this runs before the first one.
         me.desidubanime.tv.data.ServiceLocator.appScope.launch {
+            runCatching {
+                me.desidubanime.tv.data.api.Api.setHost(
+                    me.desidubanime.tv.data.ServiceLocator.settings.ddaBase(),
+                )
+            }
             runCatching { me.desidubanime.tv.data.ServiceLocator.repository.homeFeed() }
         }
         // Self-update check, deliberately a few seconds BEHIND the feed: the

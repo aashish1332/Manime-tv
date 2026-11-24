@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CircularProgressIndicator
+import me.desidubanime.tv.ui.common.Spinner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -363,7 +363,7 @@ fun PlayerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    if (state.loading) CircularProgressIndicator()
+                    if (state.loading) Spinner()
                     Text(state.message ?: "Loading…", color = Color.White)
                 }
             }
@@ -681,7 +681,7 @@ private fun BufferingOverlay(exo: ExoPlayer) {
     }
     if (visible) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
+            Spinner()
         }
     }
 }

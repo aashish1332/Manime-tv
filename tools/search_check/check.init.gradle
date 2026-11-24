@@ -1,0 +1,18 @@
+// Runs the standalone search check against the code the app actually compiles,
+// without touching the project's build files or adding a test dependency:
+//
+//   gradlew.bat --init-script tools/search_check/check.init.gradle :app:searchCheck
+//
+// The check lives in the DEBUG source set, so it is compiled by
+// compileDebugKotlin (which this task depends on) and never ships in a release.
+
+allprojects { p ->
+    p.plugins.withId('com.android.application') {
+        p.tasks.register('searchCheck', JavaExec) {
+            dependsOn p.tasks.named('compileDebugKotlin')
+            classpath = p.files(p.layout.buildDirectory.dir('tmp/kotlin-classes/debug')) +
+                p.configurations.getByName('debugRuntimeClasspath')
+            mainClass = 'me.desidubanime.tv.tools.SearchMatchCheckKt'
+        }
+    }
+}
