@@ -184,9 +184,9 @@ object FileHostResolver {
         // A HOST ALREADY PROVEN UNREACHABLE MUST COST NOTHING. Without this the
         // first caller pays the origin probe (seconds) and every caller behind
         // it paid the fallbacks again; when several servers resolve in one
-        // batch that stall is the batch's wall clock. Checked before any
-        // request, whatever the label on the link says.
-        if (isDown(hoster) || ((hoster.contains("filepress", true) || hoster.contains("filebee", true)) && filepressDown())) {
+        // batch that stall is the batch's wall clock. [isDown] is the single
+        // source of truth for that verdict, so this is the only check needed.
+        if (isDown(hoster)) {
             DebugLog.log("resolve", "$hoster is marked down — failing out immediately")
             return@withContext null
         }
@@ -354,17 +354,8 @@ object FileHostResolver {
             // no Cloudflare. Later stages must open the page we actually
             // identified.
             browserPageUrl = filepressPageUrl
-            // A DEAD ORIGIN IS NOT A SLOW ONE. FilePress aliases 301 to a
-            // numbered host (newN.filepress.lat); when that host is gone it
-            // blackholes every connection for 20s+ instead of refusing, so the
-            // API stages, the fallback API and finally the browser all sat on
-            // the spinner in turn — the "FilePress stuck on loading" report.
-            // One short probe already told us it is down; fail in ~0ms and let
-            // the player move to the next server.
-            if (filepressDown()) {
-                DebugLog.log("resolve", "FilePress origin marked down — skipping (site unreachable)")
-                return@withContext null
-            }
+            // The down verdict was already applied at the top of resolve()
+            // (isDown), so there is nothing to re-check here.
             val apiBudget = msLeft(deadline).coerceAtMost(12_000L)
             if (apiBudget >= 1_000L) {
                 kotlinx.coroutines.withTimeoutOrNull(apiBudget) { filepressApi(filepressPageUrl) }?.let {

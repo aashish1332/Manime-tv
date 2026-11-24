@@ -111,6 +111,11 @@ work (read-only); then ship an update.
   (filebeePlainHttp + FILEBEE_METHODS, ~6s of guaranteed waiting, the
   host does not answer at all) and its unused helpers. FilePress now has
   exactly one delivery path: the alias's own `/api` proxy.
+  The guard in resolve() repeats none of this logic: isDown(hoster) is the
+  single check at the top of the call, and the duplicate a few lines
+  further in (inside the FilePress branch) is gone.
+
+Released as v1.2.2 (versionCode 5) so installed TVs update by themselves.
 
 ================================================================
 SECTION 00003 — 2026-11-24 SESSION #8 (startup stutter, spinner,
