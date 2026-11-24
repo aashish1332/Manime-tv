@@ -97,6 +97,21 @@ work (read-only); then ship an update.
   four sources; the reusable parts (shared cookie jar, stream headers,
   one invoke at a time) are already present here.
 
+00004F. A DOWN HOST NO LONGER HOLDS ITS RESOLVE BATCH
+  Once every hub entered the fast pass, a dead FilePress row could cost a
+  batch its whole wall clock: raceForStream() awaits EVERY member, so two
+  healthy servers answering in ~1s still waited on the dead one.
+  FileHostResolver.isDown(hoster) now exposes the 5-minute verdict, and
+  raceForStream() drops those rows BEFORE making a request (empty result
+  -> next batch, no delay). The browser-unlock pass skips them too, so no
+  unlock round is spent on a host that cannot answer.
+  resolve() also refuses a down-marked host at its first line, whatever
+  the label on the link says.
+  Removed dead fallbacks: the whole api.filebee.xyz stage
+  (filebeePlainHttp + FILEBEE_METHODS, ~6s of guaranteed waiting, the
+  host does not answer at all) and its unused helpers. FilePress now has
+  exactly one delivery path: the alias's own `/api` proxy.
+
 ================================================================
 SECTION 00003 — 2026-11-24 SESSION #8 (startup stutter, spinner,
                                  GDFlix/FilePress, English-only UI)

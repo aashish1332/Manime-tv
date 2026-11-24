@@ -557,7 +557,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Non-gated failed. Now try gated hosts with browser unlock.
         // Dedup by hoster to avoid repeated Cloudflare challenges.
-        val distinctGated = gated.distinctBy { it.hoster.lowercase() }.take(BROWSER_RETRIES)
+        // ...but never spend an unlock round on a host that is already known
+        // unreachable: the browser step is the most expensive thing here.
+        val distinctGated = gated
+            .filterNot { it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster) }
+            .distinctBy { it.hoster.lowercase() }
+            .take(BROWSER_RETRIES)
         if (distinctGated.isNotEmpty()) {
             val elapsed = System.currentTimeMillis() - episodeStartedAt
             if (elapsed <= EPISODE_RESOLVE_CAP_MS / 2) {
@@ -613,7 +618,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         batch: List<PlayOption>,
         embeds: MutableMap<PlayOption, Playable>,
     ): Pair<PlayOption, Playable>? = coroutineScope {
-        val settled = batch.map { opt ->
+        // A DOWN HOST MUST NOT HOLD THE BATCH. This awaits EVERY member, so a
+        // FilePress row whose origin is gone used to define the batch's wall
+        // clock: two healthy servers came back in ~1s and the viewer still
+        // waited the dead one's probe. Drop those rows before any request is
+        // made; FileHostResolver already remembers the verdict for 5 minutes.
+        val (down, live) = batch.partition {
+            it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster)
+        }
+        if (down.isNotEmpty()) {
+            me.desidubanime.tv.data.DebugLog.log(
+                "resolve",
+                "batch skips down host(s): " +
+                    down.map { it.hoster }.distinct().joinToString(),
+            )
+        }
+        if (live.isEmpty()) return@coroutineScope null
+        val settled = live.map { opt ->
             async {
                 val p = try {
                     resolveOption(opt, timeoutMs = 30_000)

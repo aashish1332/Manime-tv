@@ -181,8 +181,17 @@ object FileHostResolver {
         browser: Browser? = null,
     ): Playable.Stream? = withContext(Dispatchers.IO) {
         val deadline = System.currentTimeMillis() + budgetMs
-                DebugLog.log("resolve", "$hoster start budget=${budgetMs}ms ${short(pageUrl)}")
-                DebugLog.log("resolve", "Browser available: ${browser != null}")
+        // A HOST ALREADY PROVEN UNREACHABLE MUST COST NOTHING. Without this the
+        // first caller pays the origin probe (seconds) and every caller behind
+        // it paid the fallbacks again; when several servers resolve in one
+        // batch that stall is the batch's wall clock. Checked before any
+        // request, whatever the label on the link says.
+        if (isDown(hoster) || ((hoster.contains("filepress", true) || hoster.contains("filebee", true)) && filepressDown())) {
+            DebugLog.log("resolve", "$hoster is marked down — failing out immediately")
+            return@withContext null
+        }
+        DebugLog.log("resolve", "$hoster start budget=${budgetMs}ms ${short(pageUrl)}")
+        DebugLog.log("resolve", "Browser available: ${browser != null}")
         // ToonWorld4All wraps every link in an OPAQUE /redirect/<hex> token.
         // Its interstitial embeds the real target as JSON:
         //   window.__PROPS__ = {"destination":"https://exe.io/…"(ad),
@@ -300,10 +309,10 @@ object FileHostResolver {
             }
             DebugLog.log("resolve", "GDFlix resolution failed")
         }
-        // FilePress/FileBee (fpgo/newN.filepress.*) are React SPAs whose
-        // buttons POST {id, method} to api.filebee.xyz/file/downlaod/ and get
-        // the drive URL back. Replicate the "initial" phase (no captcha) for
-        // each promising method; any CF wall falls through to the browser.
+        // FilePress/FileBee (fpgo/newN.filepress.*) are React SPAs. Their own
+        // origin proxies the backend under `/api`; that is the only supported
+        // path now (the public api.filebee.xyz fallback is dead and removed).
+        // Any CF wall falls through to the browser.
         var skipPlainCrawl = false
         // The page the browser must open later. FilePress/FileBee hand out an SPA
         // link that is NOT the URL the caller passed (that one is the adhlinks or
@@ -341,10 +350,9 @@ object FileHostResolver {
                 }
             }
             // Now try to resolve the filepress link (either the original if it's already filepress, or the extracted one)
-            // CURRENT protocol first (verified live): the domain's own
-            // `/api` proxy, no Cloudflare. The old api.filebee.xyz call below
-            // is kept only as a fallback for anything that still answers it.
-            // Later stages must open the page we actually identified.
+            // CURRENT protocol (verified live): the domain's own `/api` proxy,
+            // no Cloudflare. Later stages must open the page we actually
+            // identified.
             browserPageUrl = filepressPageUrl
             // A DEAD ORIGIN IS NOT A SLOW ONE. FilePress aliases 301 to a
             // numbered host (newN.filepress.lat); when that host is gone it
@@ -364,14 +372,11 @@ object FileHostResolver {
                     return@withContext it
                 }
             }
-            val filebeeBudget = msLeft(deadline).coerceAtMost(FILEBEE_STAGE_MS)
-            if (filebeeBudget >= 1_000L) {
-                kotlinx.coroutines.withTimeoutOrNull(filebeeBudget) { filebeePlainHttp(filepressPageUrl) }?.let {
-                    DebugLog.log("resolve", "FileBee API OK -> ${short(it.url)}")
-                    return@withContext it
-                }
-            }
-            DebugLog.log("resolve", "FileBee API found nothing")
+            // The old `api.filebee.xyz` fallback is GONE, not merely last: that
+            // host no longer answers at all (verified live), and filebee.xyz
+            // itself does not resolve for clients here. It only ever added
+            // ~6s of dead waiting between the origin's own `/api` and the
+            // browser step.
             // Skip plain HTTP crawl for FilePress/FileBee because their SPA link is only
             // accessible via browser click-capture; crawling wastes budget.
             skipPlainCrawl = true
@@ -468,8 +473,6 @@ object FileHostResolver {
 
     /** GDFlix's minting endpoint (rotates rarely; both hosts answer the same shape). */
     private const val XTROCDN_API = "https://xtrocdn.zencloud.lol/api"
-
-    private const val FILEBEE_API = "https://api.filebee.xyz"
 
     /**
      * FileBee/FilePress SPA protocol, FULLY reverse-engineered from their
@@ -581,88 +584,6 @@ object FileHostResolver {
             DebugLog.log("cloud", "resolve failed: ${e.message}")
         }
         null
-    }
-
-    private suspend fun filebeePlainHttp(pageUrl: String): Playable.Stream? = withContext(Dispatchers.IO) {
-        val slug = pageUrl.substringBefore('?').trimEnd('/').substringAfterLast('/')
-        if (slug.isBlank() || slug.length < 6) return@withContext null
-        val pageOrigin = Regex("""^(https?://[^/]+)""").find(pageUrl)?.groupValues?.get(1) ?: return@withContext null
-
-        // ---- 1. resolve url-slug -> canonical file object ----
-        var fileId = slug
-        var declaredMethod = ""
-        try {
-            val infoReq = Request.Builder()
-                .url("$FILEBEE_API/file/get/$slug")
-                .header("Origin", pageOrigin)
-                .header("Referer", "$pageOrigin/")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .build()
-            probeClient.newCall(infoReq).execute().use { r ->
-                val t = r.body?.string().orEmpty().trim()
-                if (t.startsWith("{")) {
-                    Regex(""""_id"\s*:\s*"([a-f0-9]{16,32})"""").find(t)?.groupValues?.get(1)?.let { fileId = it }
-                    Regex(""""method"\s*:\s*"([A-Za-z]{4,30})"""").find(t)?.groupValues?.get(1)?.let { declaredMethod = it }
-                    DebugLog.log("filebee", "file/get ok len=${t.length} _id=$fileId method=$declaredMethod")
-                } else {
-                    DebugLog.log("filebee", "file/get blocked (len=${t.length})")
-                }
-            }
-        } catch (e: Exception) {
-            DebugLog.log("filebee", "file/get failed: ${e.javaClass.simpleName}")
-        }
-
-        // Preferred order: whatever the file declares first, then the known
-        // instant-delivery methods (the ones whose SPA branch navigates
-        // straight to the returned URL).
-        val methods = buildList {
-            if (declaredMethod.isNotBlank()) add(declaredMethod)
-            addAll(FILEBEE_METHODS)
-        }.distinct()
-
-        // ---- 2. request the link per method ----
-        for (method in methods) {
-            try {
-                val json = """{"captchaValue":"","id":"$fileId","method":"$method"}"""
-                val req = Request.Builder()
-                    .url("$FILEBEE_API/file/downlaod/")
-                    .post(okhttp3.RequestBody.create("application/json".toMediaTypeOrNull(), json))
-                    .header("Origin", pageOrigin)
-                    .header("Referer", "$pageOrigin/")
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .build()
-                probeClient.newCall(req).execute().use { r ->
-                    val t = r.body?.string().orEmpty().trim()
-                    if (t.startsWith("<")) return@use   // CF challenge/error page
-                    // Direct methods answer a bare URL (JSON-string or plain).
-                    val url = t.removeSurrounding("\"").trim()
-                        .takeIf { it.startsWith("http") }
-                        ?: Regex("""https?://[^"\\\s]+""").findAll(t)
-                            .firstOrNull { looksLikeFileLoose(it.value) }?.value
-                    if (url != null) {
-                        DebugLog.log("filebee", "$method -> ${short(url)}")
-                        val v = verdictOf(url, browser = null, method = "GET", ranged = true)
-                            ?: verdictOf(url, browser = null, method = "GET", ranged = false)
-                            ?: Verdict.DEAD
-                        if (v == Verdict.FILE) return@withContext stream(url, browser = null)
-                    } else {
-                        DebugLog.log("filebee", "$method: no url in answer (${t.take(120)})")
-                    }
-                }
-            } catch (e: Exception) {
-                DebugLog.log("filebee", "$method failed: ${e.javaClass.simpleName}")
-            }
-        }
-        null
-    }
-
-    /** Looser than the harvest scorer: accept extension, bytes-slug or any strong host hint. */
-    private fun looksLikeFileLoose(url: String): Boolean {
-        val u = url.lowercase()
-        val path = u.substringBefore('?')
-        if (VIDEO_EXT.any { path.endsWith(it) }) return true
-        if (BYTES_SLUG.containsMatchIn(u)) return true
-        return STRONG_HINTS.any { it in u }
     }
 
     /**
@@ -1730,9 +1651,6 @@ object FileHostResolver {
     /** How long the FilePress alias may take to name its origin before we call it dead. */
     private const val FILEPRESS_PROBE_MS = 6_000L
 
-    /** Fallback FileBee API (different backend, often gone) — never worth 10s. */
-    private const val FILEBEE_STAGE_MS = 6_000L
-
     /** A host declared down is skipped for this long before it is probed again. */
     private const val FILEPRESS_DOWN_TTL_MS = 5 * 60_000L
 
@@ -1753,6 +1671,21 @@ object FileHostResolver {
     private fun filepressDown(): Boolean =
         System.currentTimeMillis() < filepressDownUntil
 
+    /**
+     * True when [hoster] is a FilePress/FileBee label and its origin has been
+     * found unreachable this session.
+     *
+     * Public on purpose: the player resolves servers in batches and an
+     * `awaitAll` waits for EVERY member, so one dead row made a batch of two
+     * healthy servers take as long as the dead one's probe. The batch can now
+     * drop it before spending a request (see PlayerViewModel.raceForStream).
+     */
+    fun isDown(hoster: String): Boolean {
+        val h = hoster.lowercase()
+        val filepressFamily = h.contains("filepress") || h.contains("filebee") || h.contains("fpgo")
+        return filepressFamily && filepressDown()
+    }
+
     private fun markFilepressDown(reason: String) {
         filepressDownUntil = System.currentTimeMillis() + FILEPRESS_DOWN_TTL_MS
         DebugLog.log(
@@ -1768,20 +1701,6 @@ object FileHostResolver {
         return origin
     }
 
-    /** FileBee delivery methods that return a direct URL without captcha. */
-    private val FILEBEE_METHODS = listOf(
-        "gpDirectDownlaod",      // google-drive-style direct file
-        "gpDirectDownload",      // variant spelling
-        "publicDownlaod",
-        "publicDownload",
-        "videoFileDownload",
-        "cloudR2Downlaod",
-        "cloudR2Download",
-        "cloudDownlaod",
-        "cloudDownload",
-        "directDownlaod",
-        "directDownload",
-    )
 
     /**
      * A Cloudflare challenge clears in a few seconds or not at all, but on a
