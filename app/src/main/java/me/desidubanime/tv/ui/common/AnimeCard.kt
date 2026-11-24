@@ -141,19 +141,23 @@ const val POSTER_ASPECT = 2f / 3f
 
 /**
  * Small colored source badges pinned to the poster's bottom-left corner.
- * Shows which sites have this anime: ADH (blue), AD (green), DDA (orange).
- * Priority order: ADH > AD > DDA — badges render left-to-right in this order.
- * Only shows badges for sources that actually have the anime.
+ * Shows which sites have this anime: ADH (blue), AD (green), T4A (purple),
+ * DDA (orange). Priority order: ADH > AD > T4A > DDA — badges render
+ * left-to-right in this order, all together with the poster.
  *
- * Called from a LazyVerticalGrid — the badge list is remembered per (hasAdh,
- * hasAd, hasTw, hasDda) so a recompose doesn't rebuild it fresh every frame.
+ * ALWAYS DRAWN. This used to return early until Anime.sourcesResolved was set,
+ * i.e. until all three site catalogs had landed (measured: ~20s, and up to the
+ * 60s grace when one site was slow). The grid therefore painted bare posters
+ * and the tags popped in later, or never — which is what "the provider tags do
+ * not show" was. The first merge already knows every source it matched, and a
+ * card that is older than a site's latest-100 window is corrected when that
+ * catalog lands and the feed re-merges.
+ *
+ * Called from a LazyVerticalGrid — the badge list is remembered per source id
+ * so a recompose doesn't rebuild it fresh every frame.
  */
 @Composable
 fun SourceBadges(anime: Anime, modifier: Modifier = Modifier) {
-    // Nothing until the source set is final — see Anime.sourcesResolved. A
-    // card that shows "DDA + AD" and then grows an "ADH" badge a few seconds
-    // later reads as a bug; one clean appearance is better than three partial ones.
-    if (!anime.sourcesResolved) return
     val badges = remember(anime.adhPostId, anime.adPostId, anime.twPostId, anime.id) {
         buildList {
             if (anime.hasAdh) add("ADH" to Color(0xFF2196F3))   // blue

@@ -9,6 +9,32 @@ APK: app/build/outputs/apk/debug/app-debug.apk
   Build command: gradlew.bat :app:assembleDebug --no-daemon
 
 ================================================================
+SECTION 00006 - PROVIDER TAGS ON EVERY CARD, IMMEDIATELY
+
+What was wrong: SourceBadges() returned early unless Anime.sourcesResolved
+was true, and that flag is only set once ALL THREE site catalogues are in
+memory. On a cold start the catalogues do not even begin until the 10s
+background settle, so posters painted with NO tags, and the tags only
+appeared after the catalogues landed and the feed re-merged - roughly 20s
+in the good case, and up to the 60s grace when one site was slow or down.
+A cached feed from disk was gated the same way, so the very first frame
+of a launch could also be bare.
+
+Fix: the badges are drawn from what the merge already matched, always.
+  - AnimeCard.SourceBadges no longer returns early; ADH / AD / T4A / DDA
+    render together with the poster, in that priority order (blue, green,
+    purple, orange), for every card that has at least one source.
+  - A catalogue landing still invalidates and re-merges the feed, so a
+    card whose source set was only completed by the full catalogue gains
+    its extra badge then - one merge, not one badge at a time.
+  - That re-merge now settles for 1.5s instead of 6s (BADGE_REFIRE_MS),
+    because its only job is completing source sets; the grace release
+    fires immediately (delay 0) for the same reason.
+
+Nothing else about the card changed: the same four labels, the same
+colors, the same position (bottom-left), the same 9sp size.
+
+================================================================
 SECTION 00005 - LIVE FILE-HOST CHECK (2026-11-24) + MENU FILTER
 
 Episode used: animedubhindi.link -> "As a Reincarnated Aristocrat S3"

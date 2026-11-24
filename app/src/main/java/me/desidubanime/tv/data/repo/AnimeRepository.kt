@@ -167,9 +167,9 @@ class AnimeRepository(
         bgScope.launch {
             kotlinx.coroutines.delay(SOURCES_BADGE_GRACE_MS)
             // Open the gate first, THEN refresh once — the re-merge stamps
-            // cards with sourcesResolved=true and badges render together.
+            // cards with sourcesResolved=true and the source sets are final.
             sourcesGraceElapsed = true
-            if (!sourcesCompleteRaw()) refreshFeedIfSourcesComplete()
+            if (!sourcesCompleteRaw()) refreshFeedIfSourcesComplete(delayMs = 0L)
         }
     }
 
@@ -179,11 +179,13 @@ class AnimeRepository(
 
     /**
      * True when a merge running right now can see every post on all sites, so
-     * the cards it produces carry their FINAL source set. Drives
-     * [Anime.sourcesResolved], which gates badge rendering.
+     * the cards it produces carry their FINAL source set. Recorded on
+     * [Anime.sourcesResolved]; badges are no longer gated on it (they render
+     * from whatever the merge matched), so this now only says whether the set
+     * is final or may still gain a source when a catalogue lands.
      *
      * After the grace period ([sourcesGraceElapsed]) this relaxes to true —
-     * badges must not be held hostage by one unreachable site.
+     * one unreachable site must not keep claiming every set is provisional.
      */
     private fun sourcesComplete(): Boolean =
         sourcesGraceElapsed || sourcesCompleteRaw()
@@ -368,7 +370,7 @@ class AnimeRepository(
                 // cause of the cold-start stall. startBackgroundWork() picks it
                 // up if the catalog beat the feed here.
                 if (sweepsStarted) startSlugSweep(posts)
-                refreshFeedIfSourcesComplete()
+                refreshFeedIfSourcesComplete(BADGE_REFIRE_MS)
             }
         } finally {
             catalogFetching = false
@@ -382,7 +384,7 @@ class AnimeRepository(
         if (posts.isNotEmpty()) {
             adCatalog = Cached(System.currentTimeMillis(), posts)
             invalidateFeed()
-            refreshFeedIfSourcesComplete()
+            refreshFeedIfSourcesComplete(BADGE_REFIRE_MS)
         }
     }
 
@@ -393,14 +395,15 @@ class AnimeRepository(
         if (posts.isNotEmpty()) {
             twCatalog = Cached(System.currentTimeMillis(), posts)
             invalidateFeed()
-            refreshFeedIfSourcesComplete()
+            refreshFeedIfSourcesComplete(BADGE_REFIRE_MS)
         }
     }
 
     /**
-     * Re-merge the feed the moment ALL catalogs are in. Until then cards carry
-     * `sourcesResolved = false` and show no badges; this is what makes them
-     * appear — once, together — without the user navigating anywhere.
+     * Re-merge the feed the moment ALL catalogs are in, so every card's source
+     * set is final without the user navigating anywhere. Badges render either
+     * way; this merge is what adds a source to a card that only matched after
+     * the full catalogue was on hand.
      */
     private var remergeJob: kotlinx.coroutines.Job? = null
 
@@ -2470,5 +2473,12 @@ class AnimeRepository(
 
         /** How long badges wait for ALL source catalogs before releasing anyway. */
         const val SOURCES_BADGE_GRACE_MS = 60_000L
+        /**
+         * Settle window before a catalogue landing re-merges the feed. Much
+         * shorter than [RE_MERGE_DEBOUNCE_MS]: this merge exists to complete the
+         * source sets behind the badges, and it should land right after the
+         * last catalogue rather than six seconds later.
+         */
+        const val BADGE_REFIRE_MS = 1_500L
     }
 }
