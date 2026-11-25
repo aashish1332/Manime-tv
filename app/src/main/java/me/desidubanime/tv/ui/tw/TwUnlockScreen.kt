@@ -142,7 +142,7 @@ fun TwUnlockScreen(
     // IO with its own short timeout, so leaving the player can never leave a
     // request running behind it.
     LaunchedEffect(tokenUrl) {
-        repeat(38) { round ->
+        repeat(30) { round ->
             if (!isActive || unlockedOnce) return@LaunchedEffect
             attempts = round + 1
             phase = Phase.Checking
@@ -156,7 +156,9 @@ fun TwUnlockScreen(
             // The relay is the reliable path once the automatic one has had a
             // fair chance; surface it instead of leaving the viewer guessing.
             if (!showRelay && round >= 8) showRelay = true
-            delay(4_000)
+            // Quick while the viewer is likely still tapping ads, then back off:
+            // T4A rate-limits repeated token reads, and a solve can take minutes.
+            delay(if (round < 12) 4_000 else 10_000)
         }
         if (!unlockedOnce) {
             phase = Phase.TimedOut
