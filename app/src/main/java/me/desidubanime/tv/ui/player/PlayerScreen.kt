@@ -508,18 +508,6 @@ fun PlayerScreen(
             Overlay.NONE -> {}
         }
 
-        // TW4A phone-unlock sheet — only show when no other overlay is active
-        if (overlay == Overlay.NONE) {
-            state.twUnlockUrl?.let { u ->
-                me.desidubanime.tv.ui.tw.TwQrScreen(
-                    targetUrl = u,
-                    onClose = { vm.dismissTwUnlock() },
-                    onUnlocked = { vm.resumeTwUnlock(exo?.currentPosition ?: 0L) },
-                    animeId = PlaybackSession.animeId,
-                )
-            }
-        }
-
         // Logs toggle button — only while a player overlay is open, not permanent.
         if (overlay != Overlay.NONE) {
             Box(

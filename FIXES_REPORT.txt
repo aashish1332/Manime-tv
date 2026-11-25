@@ -5,12 +5,12 @@ Yeh file batati hai ki is project me kya-kya fix hua, kya nahi
 hua, aur kyu. Har fix ka technical reason bhi likha hai.
 
 APK: app/build/outputs/apk/debug/app-debug.apk
-  Last build: 2026-11-25 (BUILD SUCCESSFUL, 22.2 MB, v1.2.3 / versionCode 6, debug)
+  Last build: 2026-11-25 (BUILD SUCCESSFUL, 22.2 MB, v1.2.4 / versionCode 7, debug)
   Build command: gradlew.bat :app:assembleDebug --no-daemon
 
 ================================================================
-SECTION 00008 - v1.2.3: GDFlix + T4A re-verified live, three main-thread
-                           stalls removed
+SECTION 00008 - v1.2.4: GDFlix + T4A re-verified live, QR flow deleted,
+                           three main-thread stalls removed
 
 WHAT WAS TESTED LIVE (2026-11-25, plain HTTP from a PC)
 
@@ -43,22 +43,36 @@ WHAT WAS TESTED LIVE (2026-11-25, plain HTTP from a PC)
                pre-ad pointer, not the live file.
     GDFlix     /redirect/ -> 302 -> shrinkme.click/<slug>: an ad + captcha
                shortener (form POST with _csrfToken), no file URL in its HTML.
-  => T4A's files ARE live, but behind the token's ad gate. That is the real
-     reason the app kept falling back to the QR sheet: the /redirect/ branch
-     returned null as soon as the props target failed, so the offscreen
-     browser - the one component that can clear the gate - never ran for a
-     T4A row. Fixed in this build.
+  => T4A's files ARE live, but the site gates them. Its own redirect page
+     (opened in a real Chromium) says: "24 Hours System - You'll see one
+     shortner ad each time you download a file. After Solving All 4 Shortner
+     ads you'll unlock 24 hours of unlimited, ad-free access!" and prints the
+     real destination (hubcloud.mov/drive/<id>).
+     Consequence for plain HTTP: the FIRST tokens answer 200 + __PROPS__, and
+     every token after that 302s to shrinkme.click until the 24-hour cookie
+     exists. Verified: 480p HubCloud 200 + props, then all remaining rows
+     302 -> shrinkme.click/... .
+     So the app must clear that gate ONCE in its offscreen WebView and then
+     reuse the cookie - which is exactly what this build does. The QR sheet
+     was the old "clear it on your phone" workaround and is now GONE.
 
 FIXES IN THIS BUILD
 
-4. T4A RESOLVES THROUGH ITS AD GATE, NO PHONE/QR NEEDED
-   The /redirect/ branch used to end with `return null` when the props target
-   did not directly play. It now hands the token to FileHostBrowser instead:
-   the offscreen WebView follows the 302 into the shortener, clicks through
-   it and captures the host's minted link, exactly as it already did for
-   GDFlix/FilePress. The generic plain crawl is skipped for that token (it was
-   already walked), so the browser gets the rest of the pick's budget.
-   QR/phone unlock stays what it was: a last resort after every fallback.
+4. T4A RESOLVES LIKE ADH - IN THE APP, NO PHONE, NO QR
+   a) The /redirect/ branch used to end with `return null` when the props
+      target did not directly play, so the offscreen browser - the one
+      component that can clear the site's gate - never ran for a T4A row.
+      It now falls through: the WebView follows the 302 into the shortener,
+      clicks through it and captures the host's link, or earns the 24-hour
+      cookie and lets the re-crawl resolve the token over plain HTTP.
+   b) redirectTargetOf() now takes the browser, so the cookie earned by that
+      WebView is sent on every later props read. Once the gate is cleared,
+      T4A resolves with ONE plain GET + the host resolver - the same cost as
+      an ADH row.
+   c) The QR/phone unlock flow is DELETED, not just demoted: TwQrScreen,
+      TwUnlockHolder, twUnlockUrl/pendingTw state, resumeTwUnlock /
+      dismissTwUnlock, verifyTwUnlock and its unused helpers are all gone.
+      There is no way left for a T4A row to ask the viewer for a phone.
 
 5. SeenStore WAS READ FROM THE COMPOSITION THREAD
    HomeSections calls firstRunAt() plus a seenStamp() per card. The first call

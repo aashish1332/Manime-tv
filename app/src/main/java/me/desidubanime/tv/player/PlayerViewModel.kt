@@ -32,8 +32,6 @@ data class PlayerUiState(
     val hasPrev: Boolean = false,
     /** Exact intro/outro windows read from the MKV's chapter markers. */
     val skipWindows: MkvChapters.SkipWindows? = null,
-    /** Non-null -> QR unlock sheet visible for this /redirect/ token URL. */
-    val twUnlockUrl: String? = null,
 )
 
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
@@ -70,22 +68,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var twAttempted = false
 
-    /** TW option that offered the phone unlock (QR sheet), kept for the resume. */
-    private var pendingTw: PlayOption? = null
     /** Episode-start wall clock â€” caps TOTAL resolve time so weak boxes never sit in minutes-long unlock loops (user-reported full-TV reboots). */
     private var episodeStartedAt = 0L
 
-    fun dismissTwUnlock() {
-        pendingTw = null
-        _state.value = _state.value.copy(twUnlockUrl = null)
-    }
-
-    /** A phone-unlocked URL has arrived — resolve that same TW option again. */
-    fun resumeTwUnlock(currentPosMs: Long) {
-        val opt = pendingTw ?: return
-        dismissTwUnlock()
-        selectOption(opt, currentPosMs)
-    }
 
     private val episodes: List<Episode> get() = PlaybackSession.episodes
 
@@ -204,45 +189,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 null
             },
         )
-        me.desidubanime.tv.data.DebugLog.log("tw-unlock", "pick: ${option.label} isHub=${option.isHub} src=${option.sourceLabel}")
-        // TW pick: the holder is empty (the site is ad-walled). The QR sheet is
-        // NOT opened here — resolution is attempted first.
-        if (option.isHub && isTwSource(option.sourceLabel)) {
-            val held = TwUnlockHolder.take(PlaybackSession.animeId)
-            // A phone-unlocked URL is a SHORTCUT, not a prerequisite. TW4A's
-            // /redirect/ token carries the real hoster link inside its
-            // __PROPS__, and plain HTTP reads that in one GET — so the QR
-            // sheet must never open before resolution has even been tried.
-            // The failure path further down still offers it when a link is
-            // genuinely dead, which is the only case that ever needs it.
-            if (held == null) {
-                me.desidubanime.tv.data.DebugLog.log(
-                    "tw-unlock",
-                    "no phone URL yet — resolving ${option.hoster} over plain HTTP",
-                )
-            } else {
-            me.desidubanime.tv.data.DebugLog.log("tw-unlock", "using phone URL -> $held")
-            _state.value = _state.value.copy(
-                playable = Playable.Stream(
-                    url = held,
-                    headers = mapOf(
-                        "User-Agent" to me.desidubanime.tv.data.api.Api.USER_AGENT,
-                        // hubcloud.cx stopped resolving (verified 2026-11); the
-                        // live family is hubcloud.mov. Derive the referer from
-                        // the actual file URL so a future rotation keeps working.
-                        "Referer" to (
-                            (Regex("""^(https?://[^/]+)""").find(held)?.groupValues?.get(1)
-                                ?: "https://hubcloud.mov") + "/"
-                            ),
-                    ),
-                    isHls = false,
-                ),
-                loading = false,
-            )
-            fetchSkipWindows(_state.value.playable!!)
-            return
-            }
-        }
+        me.desidubanime.tv.data.DebugLog.log("pick", "${option.label} isHub=${option.isHub} src=${option.sourceLabel}")
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
             // A PICKED SERVER THAT HAS NO WORKING FILE MUST NOT DEAD-END.
@@ -283,21 +230,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val next = _state.value.options.firstOrNull { it !in tried }
                 if (next == null || tried.size >= MAX_PICK_FALLBACK) {
-                    // Everything failed. Only NOW — as a last resort, with no
-                    // other server left to try — offer the phone unlock for a
-                    // T4A /redirect/ row. A dead file never opens it.
-                    if (option.isHub &&
-                        isTwSource(option.sourceLabel) &&
-                        option.embedUrl.contains("/redirect/", ignoreCase = true)
-                    ) {
-                        pendingTw = option
-                        _state.value = _state.value.copy(
-                            loading = false,
-                            playable = null,
-                            twUnlockUrl = option.embedUrl,
-                        )
-                        return@launch
-                    }
                     _state.value = _state.value.copy(
                         loading = false,
                         playable = null,

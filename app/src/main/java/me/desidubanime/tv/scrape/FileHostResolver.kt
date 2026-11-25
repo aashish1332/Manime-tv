@@ -228,7 +228,7 @@ object FileHostResolver {
         // take it, so the generic crawl below does not repeat that work.
         var twTokenExhausted = false
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
-            val target = redirectTargetOf(pageUrl)
+            val target = redirectTargetOf(pageUrl, browser)
             if (target != null && target.contains("mega.nz/", ignoreCase = true)) {
                 // MEGA CANNOT BE RESOLVED THIS WAY, AND PRETENDING OTHERWISE
                 // COSTS THE VIEWER A QR WALL. A T4A MEGA card carries no file
@@ -491,21 +491,6 @@ object FileHostResolver {
         crawl(pageUrl, deadline, browser).also {
             DebugLog.log("resolve", if (it == null) "re-crawl found nothing" else "re-crawl OK -> ${short(it.url)}")
         }
-    }
-
-    /**
-     * Public probe for the TW4A QR-unlock flow: resolve [interstitialUrl]
-     * (archive.toonworld4all.me/redirect/<hex>) to domain+hidden via its
-     * __PROPS__, then ranged-GET the constructed drive URL. A FILE verdict
-     * means the site is serving real bytes to THIS client — i.e. unlocked.
-     * Called repeatedly from the QR screen while the user solves ads on
-     * their phone (same WiFi -> same public IP).
-     */
-    suspend fun verifyTwUnlock(interstitialUrl: String): Boolean = withContext(Dispatchers.IO) {
-        val stream = runCatching { resolveRedirectProps(interstitialUrl) }.getOrNull()
-            ?: return@withContext false
-        DebugLog.log("tw-unlock", "probing ${short(stream.url)}")
-        servesMedia(stream)
     }
 
     /** Keep log lines readable — these URLs are enormous. */
@@ -890,8 +875,12 @@ object FileHostResolver {
      * the hoster path the file actually lives behind. Joining the two needs no
      * ad view, no QR scan and no browser.
      */
-    private fun redirectTargetOf(pageUrl: String): String? {
-        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS) ?: return null
+    private fun redirectTargetOf(pageUrl: String, browser: Browser? = null): String? {
+        // [browser] is what makes the second and later T4A picks instant: once
+        // the offscreen WebView has cleared the site's shortener gate, the
+        // 24-hour cookie it earned is sent with this GET and the token answers
+        // __PROPS__ again instead of 302-ing to the ad.
+        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS, browser) ?: return null
         // The props are a single line of JSON on the interstitial page.
         val props = Regex("""window\.__PROPS__\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL)
             .find(html)?.groupValues?.get(1)
@@ -946,40 +935,6 @@ object FileHostResolver {
         DebugLog.log("http", "follow failed ${e.javaClass.simpleName}: ${e.message} ${short(url)}")
         null
     }
-
-    /**
-     * One plain GET against a /redirect/ token page; when its HTML embeds
-     * `window.__PROPS__ = {…"link":{"domain":D,"hidden":H}}`, D+H is the real
-     * drive URL. The sibling "destination" field is an AD SHORTENER
-     * (exe.io and friends) — deliberately ignored. Null when the shape isn't
-     * there or nothing usable could be built.
-     */
-    private fun resolveRedirectProps(pageUrl: String): Playable.Stream? {
-        val html = get(pageUrl, Long.MAX_VALUE) ?: return null
-        val linkObj = Regex(""""link"\s*:\s*(\{[^{}]*\})""").find(html)?.groupValues?.get(1)
-            ?: return null
-        val domain = Regex(""""domain"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
-        val hidden = Regex(""""hidden"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
-        if (!domain.startsWith("http") || hidden.isBlank()) return null
-        val url = domain.trimEnd('/') + "/" + hidden.removePrefix("/")
-        // Sanity: the built URL must look like a file host, not another ad hop.
-        if (!isPlausible(url) && score(url) <= 0) {
-            DebugLog.log("resolve", "__PROPS__ target scored 0 -> ${short(url)}")
-        }
-        return Playable.Stream(
-            url = url,
-            headers = buildMap {
-                put("User-Agent", Api.USER_AGENT)
-                Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)
-                    ?.let { put("Referer", "$it/") }
-            },
-            isHls = false,
-        )
-    }
-
-    /** Cheap confirmation that a resolved URL actually serves bytes before we hand it over. */
-    private fun servesMedia(stream: Playable.Stream): Boolean =
-        probe(stream.url, browser = null, deadline = System.currentTimeMillis() + PROBE_DEADLINE_MS) == Verdict.FILE
 
     /**
      * Breadth-first: probe this page's candidates, then descend into the ones
