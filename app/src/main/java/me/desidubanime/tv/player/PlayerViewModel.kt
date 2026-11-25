@@ -437,7 +437,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // player â€” no skip-intro, no quality/audio/subtitle menus, no resume.
         // Now a host that can't be resolved falls through to the next server
         // instead of loading its website.
-        val hubOptions = ep.hubLinks.map { link ->
+        val hubOptions = ep.hubLinks
+            // RETIRED HOSTS NEVER BECOME ROWS. FilePress/FileBee blackhole the
+            // connection (verified live 2026-11-25), so a row for them could
+            // only ever spend the viewer's time and fail.
+            .filterNot { me.desidubanime.tv.scrape.FileHostResolver.isRetired(it.hoster) }
+            .map { link ->
             PlayOption(
                 label = "${link.source.label} - ${link.hoster} - ${link.quality}",
                 group = ServerGroup.DUB,
@@ -544,24 +549,28 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * leaving the sheet empty.
      */
     private fun visibleOptions(options: List<PlayOption>): List<PlayOption> {
-        // T4A's files sit behind its own captcha gate. While that gate is up
-        // every one of its rows is unplayable, so they are hidden rather than
-        // offered: a row that can only fail is worse than no row, and the same
-        // verdict keeps the resolve batches from spending a request on each.
+        // T4A's files sit behind its own captcha gate, but its rows are KEPT and
+        // MARKED instead of hidden: hiding them made the phone unlock
+        // unreachable on any episode that also had another source, which is
+        // exactly when a viewer wants to unlock. The marker is idempotent and
+        // stripped from [PlayOption.stickyKey], so it never breaks stickiness.
         val twGated = me.desidubanime.tv.scrape.FileHostResolver.twGated()
-        val visible = options.filterNot {
-            if (!it.isHub) return@filterNot false
-            if (twGated && isTwSource(it.sourceLabel)) return@filterNot true
-            me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster)
-        }
-        if (visible.size != options.size) {
-            me.desidubanime.tv.data.DebugLog.log(
-                "resolve",
-                "menu hides ${options.size - visible.size} down server(s)",
-            )
-        }
+        val visible = options
+            .filterNot { it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster) }
+            .map { option ->
+                if (twGated && option.isHub && isTwSource(option.sourceLabel)) {
+                    option.markedForUnlock()
+                } else {
+                    option
+                }
+            }
         return visible.ifEmpty { options }
     }
+
+    /** Adds the "· unlock" marker exactly once (the menu is rebuilt repeatedly). */
+    private fun PlayOption.markedForUnlock(): PlayOption =
+        if (label.endsWith(PlayOption.UNLOCK_MARK)) this
+        else copy(label = label + PlayOption.UNLOCK_MARK)
 
     /** TW source check — label may be "TW" or "ToonWorld" depending on LinkSource enum. */
     private fun isTwSource(label: String?) =
@@ -682,7 +691,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // Only when the gate is KNOWN to be up (one cheap probe already paid
             // for by a TW row): otherwise this would pop a QR on every failed
             // resolve, including episodes that simply have no T4A row.
-            val twRow = if (me.desidubanime.tv.scrape.FileHostResolver.twGated()) {
+            val twRow = if (me.desidubanime.tv.scrape.FileHostResolver.twGated() &&
+                _state.value.playable == null
+            ) {
                 ordered.firstOrNull { it.isHub && isTwSource(it.sourceLabel) }
             } else {
                 null

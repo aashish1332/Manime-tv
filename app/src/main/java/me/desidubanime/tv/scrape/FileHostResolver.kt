@@ -1815,6 +1815,18 @@ object FileHostResolver {
     fun twGated(): Boolean = System.currentTimeMillis() < twGateUntil
 
     /**
+     * Hoster families that no longer work at all, so their rows are never offered.
+     *
+     * FilePress/FileBee: verified dead on 2026-11-25 — fpgo.xyz (and every
+     * numbered newN.filepress.lat origin behind it) blackholes the connection,
+     * so every one of its rows could only ever fail after a timeout.
+     */
+    fun isRetired(hoster: String): Boolean {
+        val h = hoster.lowercase()
+        return h.contains("filepress") || h.contains("filebee") || h.contains("fpgo")
+    }
+
+    /**
      * The hoster page a ToonWorld4All `/redirect/` token points at RIGHT NOW,
      * or null while the site is still serving its captcha gate.
      *

@@ -24,8 +24,17 @@ data class PlayOption(
      * Strip sizes/dates; keep server name + resolution.
      */
     val stickyKey: String = label
+        // The "· unlock" marker is a T4A state, not part of the server's
+        // identity: stripping it keeps the sticky server matching after the
+        // gate flips.
+        .replace(UNLOCK_MARK, "")
         .replace(Regex("""·\s*[\d.]+\s*[KMG]B""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""\[(Size|Upload)[^\]]*]""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("\\s+"), " ")
         .trim()
+
+    companion object {
+        /** Suffix the menu shows on a ToonWorld4All row that needs the phone unlock. */
+        const val UNLOCK_MARK = " · unlock"
+    }
 }

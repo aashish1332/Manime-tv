@@ -1272,3 +1272,47 @@ CHECKS
 - :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,311,303 bytes)
 NOT VERIFIED (no adb/device): on-TV rendering/focus of the unlock screen, a
 real phone solve, and the relay round trip.
+
+================================================================
+SECTION G — v1.2.5 (republished): rows, hosts, startup smoothness
+================================================================
+T4A ROWS ARE KEPT AND MARKED
+- They used to be hidden while the gate was up, which made the phone unlock
+  unreachable on any episode that also had another source. Rows now stay in
+  the menu with a " · unlock" suffix (added exactly once, and stripped from
+  PlayOption.stickyKey so stickiness still matches across episodes).
+
+UNLOCK CANNOT TOUCH A PLAYING EPISODE (verified in code)
+- `twUnlock` is only ever set from the two "nothing played" paths:
+  selectOption's final failure (playable was cleared when the pick started)
+  and autoResolve's final failure (guarded on playable == null).
+- cancelTwUnlock / BACK only clear the flag and the message: they never touch
+  playable, selected, resolveJob or PlaybackSession. Opening or closing the
+  screen therefore cannot pause, restart or drop a stream.
+- While it is up the player's key handler returns false for everything except
+  BACK, so transport keys go to the screen's buttons instead of the player.
+
+HOSTS (measured 2026-11-25)
+- GDFlix: WORKS. gdflix.vip/file/<id> -> 302 newN.gdflix.io -> key -> POST
+  /mfile/<id> action=instant -> video-downloads.googleusercontent.com/...
+  -> 200 video/mkv (2 of 2 sampled uploads). Kept, resolver unchanged.
+- FilePress/FileBee: DEAD. fpgo.xyz answered ConnectTimeout on every sampled
+  link. Rows are now never built (FileHostResolver.isRetired), so no menu row
+  and no resolve attempt can spend time on them.
+
+STARTUP STUTTER (root cause)
+- The feed's CPU-bound merge (title matching over thousands of posts, three
+  full-list sorts, duplicate collapsing) ran on the normal IO pool while the
+  grid painted, and the whole feed + cursor were serialised to disk BEFORE the
+  feed was returned. That is the "laggy until the refresh finishes" report.
+- Merge stages now run on one minimum-priority thread ("feed-merge"); the
+  feed save, cursor save and title-flush moved off the return path into
+  bgScope. Home paints from cache first and the rebuild no longer competes
+  with the frame.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS — 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,653,486 bytes)
+NOT VERIFIED (no adb/device): on-TV smoothness of the launch refresh, the
+unlock screen layout/focus, a real phone solve.

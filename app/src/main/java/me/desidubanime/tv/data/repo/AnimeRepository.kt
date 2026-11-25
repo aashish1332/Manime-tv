@@ -33,6 +33,7 @@ import me.desidubanime.tv.util.SearchMatch
 import me.desidubanime.tv.util.Titles
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -415,6 +416,23 @@ class AnimeRepository(
      * complete merges (dozens of requests each) while the viewer was trying to
      * scroll. One debounced merge produces the same final feed.
      */
+    /**
+     * ONE LOW-PRIORITY THREAD for the feed's CPU-bound merge.
+     *
+     * The merge (title matching over thousands of posts, duplicate collapsing,
+     * three full-list sorts) is pure computation, and on a TV box it ran on the
+     * ordinary IO pool at normal priority. That starved the UI thread while the
+     * grid was painting — the "laggy and stuttery right after opening, fine
+     * once the refresh finishes" report. A single minimum-priority thread makes
+     * the merge yield to the frame instead of competing with it; the feed is
+     * already painted from cache by then, so nothing is waiting on its speed.
+     */
+    private val mergeLane = java.util.concurrent.Executors
+        .newSingleThreadExecutor { runnable ->
+            Thread(runnable, "feed-merge").apply { priority = Thread.MIN_PRIORITY }
+        }
+        .asCoroutineDispatcher()
+
     private fun refreshFeedIfSourcesComplete(delayMs: Long = RE_MERGE_DEBOUNCE_MS) {
         if (!sourcesComplete()) return
         synchronized(feedLoadLock) {
@@ -908,35 +926,35 @@ class AnimeRepository(
             if (!titlesCold) bgScope.launch { runCatching { warmTitlesFromListings(Network.bulk) } }
             val ddaRaw = animeDeferred.await()
             titlesDeferred?.let { kotlinx.coroutines.withTimeoutOrNull(TITLE_WARM_MS) { it.await() } }
-            val ddaAll = ddaRaw.map { it.withEnglishTitle() }
+            val ddaAll = withContext(mergeLane) { ddaRaw.map { it.withEnglishTitle() } }
 
             // ---- merge in AnimeDubHindi (PRIMARY) ----
             val adhPosts = adhDeferred.await()
-            var all = mergeAdhFirst(adhPosts, ddaAll, Network.feed)
+            var all = withContext(mergeLane) { mergeAdhFirst(adhPosts, ddaAll, Network.feed) }
 
             // ---- merge in AnimeDrive.in ----
             val adPosts = adDeferred.await()
-            all = mergeAd(all, adPosts)
+            all = withContext(mergeLane) { mergeAd(all, adPosts) }
 
             // ---- merge in ToonWorld4All ----
             val twPosts = twDeferred.await()
-            all = mergeTw(all, twPosts)
+            all = withContext(mergeLane) { mergeTw(all, twPosts) }
 
             // Recency order (ADH modified / DDA episode feed) so "All Anime"
             // renders newest-first — ADH-first merging appends DDA-only anime
             // at the end, which must not sink them out of the section.
-            all = all.sortedByDescending { maxOf(it.updatedAt, it.publishedAt) }
+            all = withContext(mergeLane) { all.sortedByDescending { maxOf(it.updatedAt, it.publishedAt) } }
 
             // Collapse near-duplicates into ONE card per anime: when matching
             // fails, the same show arrives as separate ADH-only / AD-only / DDA
             // cards. Runs BEFORE the recency stamping below so the fused card's
             // stamps are computed from every source it absorbed.
-            all = collapseDuplicates(all)
+            all = withContext(mergeLane) { collapseDuplicates(all) }
 
             // Stamp sources learned outside this merge (detail-open findAdhFor,
             // background slug sweep) so badges match the server list. Before
             // the upcoming-filter below, which keys off adhEpisodesUrl.
-            all = attachKnownSources(all)
+            all = withContext(mergeLane) { attachKnownSources(all) }
 
             val episodeFeed = episodesDeferred.await()
 
@@ -980,30 +998,37 @@ class AnimeRepository(
                 val dates = listOf(a.publishedAt, adhDate, adDate, twDate).filter { it.isNotBlank() }
                 return dates.minOrNull() ?: a.publishedAt
             }
-            all = all.map { it.copy(latestEpisodeAt = recency(it), publishedAt = released(it)) }
+            all = withContext(mergeLane) {
+                all.map { it.copy(latestEpisodeAt = recency(it), publishedAt = released(it)) }
+            }
             val newEpisodes = all.sortedByDescending { it.latestEpisodeAt }.take(NEW_EPISODES_COUNT)
             val newReleases = all.sortedByDescending { it.publishedAt }.take(NEW_RELEASES_COUNT)
 
             HomeFeed(newEpisodes = newEpisodes, newReleases = newReleases, all = all)
                 .also { feedCache = Cached(System.currentTimeMillis(), it) }
-                .also { feedStore?.save(it) }
+                // DISK WRITES ARE NOT ON THE PAINT PATH. Serialising the whole
+                // feed and the cursor before returning made Home wait for two
+                // file writes it does not need; they now run after the feed is
+                // already on screen.
+                .also { feed -> bgScope.launch { runCatching { feedStore?.save(feed) } } }
                 // Record what this build covered, so the next refresh can ask
                 // "anything new?" instead of rebuilding. Stamped FROM the
                 // sources, not from the clock: a source that was slow but
                 // already current must not look newer than its own newest post.
                 .also {
-                    saveFeedCursor(
-                        FeedCursor(
-                            ddaModified = newestStamp(ddaRaw.map { a -> a.updatedAt }),
-                            episodeDate = newestStamp(episodeFeed.map { e -> e.date }),
-                            adhModified = newestStamp(adhPosts.map { p -> p.modified }),
-                            adModified = newestStamp(adPosts.map { p -> p.modified }),
-                            twModified = newestStamp(twPosts.map { p -> p.modified }),
-                            savedAt = System.currentTimeMillis(),
-                        ),
+                    val cursor = FeedCursor(
+                        ddaModified = newestStamp(ddaRaw.map { a -> a.updatedAt }),
+                        episodeDate = newestStamp(episodeFeed.map { e -> e.date }),
+                        adhModified = newestStamp(adhPosts.map { p -> p.modified }),
+                        adModified = newestStamp(adPosts.map { p -> p.modified }),
+                        twModified = newestStamp(twPosts.map { p -> p.modified }),
+                        savedAt = System.currentTimeMillis(),
                     )
+                    bgScope.launch {
+                        runCatching { saveFeedCursor(cursor) }
+                        runCatching { flushTitleLearns() }
+                    }
                 }
-                .also { runCatching { flushTitleLearns() } }
                 // The user is looking at a feed now — background sweeps may
                 // start. Until this point they'd be competing with the one
                 // thing the app owes the user on open.
