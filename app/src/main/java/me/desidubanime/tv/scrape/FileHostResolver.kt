@@ -168,6 +168,22 @@ object FileHostResolver {
         .build()
 
     /**
+     * Client for ToonWorld4All's /redirect/ interstitial: SAME timeouts and
+     * headers, NO COOKIES.
+     *
+     * The site gates files with a 24-hour "verification" session. The FIRST
+     * token view of a fresh visitor renders the page (and sets its
+     * `pending_verify` cookie); every later token view for that same visitor is
+     * a 302 to the ad shortener instead. Sharing [probeClient]'s jar therefore
+     * turned every T4A row after the first into a redirect that had nothing to
+     * parse. A cookie-less client makes each token view a first view, so the
+     * page — and its props — always come back. Verified live 2026-11.
+     */
+    private val anonymousClient: OkHttpClient = probeClient.newBuilder()
+        .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+        .build()
+
+    /**
      * Resolve [pageUrl] to a playable direct stream, or null.
      *
      * HubCloud keeps its dedicated two-hop resolver — its layout is known, so
@@ -206,29 +222,33 @@ object FileHostResolver {
                 return@withContext resolve(real, hosterFromUrl(real, hoster), msLeft(deadline), browser)
             }
         }
-        // ToonWorld4All wraps every link in an OPAQUE /redirect/<hex> token.
-        // Its interstitial embeds the real target as JSON:
-        //   window.__PROPS__ = {"destination":"https://exe.io/…"(ad),
-        //                       "link":{"domain":"https://hubcloud.cx/video/","hidden":"<id>"}}
-        // One plain GET, no browser, no crawl — try it before anything else.
-        // (Only fires when the page actually carries that shape; harmless for
-        // every other host.)
+        // ToonWorld4All wraps every link in an OPAQUE /redirect/<hex> token and
+        // its interstitial embeds the hoster target as JSON:
+        //   window.__PROPS__ = {"destination":"https://shrinkme.click/…"(ad),
+        //                       "link":{"domain":"https://hubcloud.mov/drive/",
+        //                               "hidden":"<id>"},"total":4}
         //
-        // That JSON is ONE plain GET away — no ad to watch, no QR to scan
-        // (verified live against archive.toonworld4all.me).
+        // MEASURED BEHAVIOUR (2026-11), all of it live:
+        //  * A fresh visitor gets that page plus a `pending_verify` cookie, and
+        //    its `link.hidden` is RANDOM FILLER of the real id's length — the
+        //    site generates it client-side for the blurred preview, so the
+        //    props target is a decoy until the visitor has passed the gate.
+        //  * The site's gate is "solve our shortener's captcha" (Cloudflare
+        //    Turnstile: token field empty, Continue disabled until a HUMAN
+        //    ticks it). Four solves buy 24 hours of real links.
+        //  * Therefore nothing an app can do — plain HTTP, crawler UAs, the
+        //    data-route, HEAD/GET, an offscreen WebView — produces the real id.
         //
-        // The card's printed label is NOT the authority: T4A prints "GDFlix"
-        // on a row whose token may point anywhere. So the resolved URL is
-        // re-submitted through this same entry point with the hoster derived
-        // from THAT url, which routes it to the right dedicated resolver.
-        // That re-dispatch is what removes the QR requirement: before it, the
-        // token was only probed once and, when the guess wasn't directly
-        // playable, control fell into the browser flow — the ad/QR wall.
-        // Set when a T4A token has already been walked as far as plain HTTP can
-        // take it, so the generic crawl below does not repeat that work.
-        var twTokenExhausted = false
+        // So T4A is resolved for real when the site hands out a real target,
+        // and ENDS after one cheap probe when it hands out a decoy. No browser
+        // hop, no ad page and no QR code is ever involved: the player moves to
+        // the next server instead.
+        if (pageUrl.contains("/redirect/", ignoreCase = true) && twGated()) {
+            DebugLog.log("resolve", "T4A ad-gate active — row skipped without a request")
+            return@withContext null
+        }
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
-            val target = redirectTargetOf(pageUrl, browser)
+            val target = redirectTargetOf(pageUrl)
             if (target != null && target.contains("mega.nz/", ignoreCase = true)) {
                 // MEGA CANNOT BE RESOLVED THIS WAY, AND PRETENDING OTHERWISE
                 // COSTS THE VIEWER A QR WALL. A T4A MEGA card carries no file
@@ -239,11 +259,29 @@ object FileHostResolver {
                 return@withContext null
             }
             if (target != null && !target.contains("/redirect/", ignoreCase = true)) {
-                DebugLog.log("resolve", "redirect -> ${short(target)} (direct, no ad/QR)")
+                DebugLog.log("resolve", "redirect -> ${short(target)}")
+                // DECOY CHECK — ONE GET, and the only thing that separates a
+                // playable row from an ad-gated one. A real target is a hoster
+                // page (HubCloud ~20-28KB, GDFlix ~29-44KB); a gated row's
+                // decoy id lands on the host's ~20-byte "File Not Found". Only
+                // a TINY body proves the decoy (a null/403 answer stays
+                // inconclusive and still gets the normal resolvers), so this
+                // can never reject a healthy upload.
+                val targetPage = get(target, System.currentTimeMillis() + TW_PROPS_PROBE_MS)
+                if (targetPage != null && targetPage.length < TW_DECOY_PAGE_BYTES) {
+                    twGateUntil = System.currentTimeMillis() + TW_GATE_TTL_MS
+                    DebugLog.log(
+                        "resolve",
+                        "T4A props id is a gate decoy (${targetPage.length}b) — row skipped, no browser",
+                    )
+                    return@withContext null
+                }
                 // SHARED DEADLINE. This used to hand the nested resolve the
                 // FULL budget again, so one T4A token could burn 45s here and
                 // another 45s below before the viewer saw anything.
-                resolve(target, hosterFromUrl(target, hoster), msLeft(deadline), browser)?.let {
+                // NO BROWSER, deliberately: T4A's gate is a captcha that only a
+                // human can tick, so a WebView pass could only ever burn budget.
+                resolve(target, hosterFromUrl(target, hoster), msLeft(deadline), browser = null)?.let {
                     DebugLog.log("resolve", "redirect resolved -> ${short(it.url)}")
                     return@withContext it
                 }
@@ -260,14 +298,14 @@ object FileHostResolver {
                 // only ever reach the QR sheet. With a browser available, fall
                 // through to the browser stage below and let it clear the gate
                 // the way the site intends.
-                if (browser == null) {
-                    DebugLog.log("resolve", "redirect target unresolved, no browser -> ${short(target)}")
-                    return@withContext null
-                }
-                twTokenExhausted = true
-                DebugLog.log("resolve", "redirect target unresolved — handing the token to the browser")
+                DebugLog.log("resolve", "redirect target unresolved -> ${short(target)}")
+                return@withContext null
             }
-            DebugLog.log("resolve", "redirect __PROPS__ empty, falling through to generic crawl")
+            // No props at all: the token itself is dead or gated. Crawling the
+            // token page (or opening it in a browser) cannot mint a file, so
+            // end here rather than spending the caller's budget.
+            DebugLog.log("resolve", "redirect props missing (gate or dead token) — row skipped")
+            return@withContext null
         }
         if (hoster.equals("HubCloud", ignoreCase = true)) {
             runCatching { HubCloudResolver.resolve(pageUrl) }.getOrNull()?.let {
@@ -425,9 +463,7 @@ object FileHostResolver {
             skipPlainCrawl = true
         }
         // 1. Plain HTTP. Cheap, and enough for any host that isn't gated.
-        if (twTokenExhausted) {
-            DebugLog.log("resolve", "skip plain crawl: T4A token already walked to its ad gate")
-        } else if (!skipPlainCrawl) {
+        if (!skipPlainCrawl) {
             crawl(pageUrl, deadline, browser = null)?.let {
                 DebugLog.log("resolve", "plain-HTTP OK -> ${short(it.url)}")
                 return@withContext it
@@ -875,12 +911,12 @@ object FileHostResolver {
      * the hoster path the file actually lives behind. Joining the two needs no
      * ad view, no QR scan and no browser.
      */
-    private fun redirectTargetOf(pageUrl: String, browser: Browser? = null): String? {
-        // [browser] is what makes the second and later T4A picks instant: once
-        // the offscreen WebView has cleared the site's shortener gate, the
-        // 24-hour cookie it earned is sent with this GET and the token answers
-        // __PROPS__ again instead of 302-ing to the ad.
-        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS, browser) ?: return null
+    private fun redirectTargetOf(pageUrl: String): String? {
+        // COOKIE-LESS on purpose: with the session jar the second token view of
+        // a visit is a 302 to the shortener, so the props were only ever
+        // readable for the first T4A row of a session (verified live).
+        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS, anonymous = true)
+            ?: return null
         // The props are a single line of JSON on the interstitial page.
         val props = Regex("""window\.__PROPS__\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL)
             .find(html)?.groupValues?.get(1)
@@ -1275,7 +1311,12 @@ object FileHostResolver {
         isHls = url.contains(".m3u8"),
     )
 
-    private fun get(url: String, deadline: Long, browser: Browser? = null): String? = try {
+    private fun get(
+        url: String,
+        deadline: Long,
+        browser: Browser? = null,
+        anonymous: Boolean = false,
+    ): String? = try {
         val left = deadline - System.currentTimeMillis()
         if (left <= 0) {
             null
@@ -1289,7 +1330,7 @@ object FileHostResolver {
                 // no second WebView hop is needed.
                 .apply { browser?.cookiesFor(url)?.let { header("Cookie", it) } }
                 .build()
-            probeClient.newCall(req).execute().use { resp ->
+            (if (anonymous) anonymousClient else probeClient).newCall(req).execute().use { resp ->
                 val body = if (resp.isSuccessful) readCapped(resp) else null
                 DebugLog.log(
                     "http",
@@ -1742,6 +1783,56 @@ object FileHostResolver {
 
     /** One plain GET of a T4A /redirect/ interstitial must never hang a resolve. */
     private const val REDIRECT_BUDGET_MS = 12_000L
+
+    /** One GET of a T4A props target, to tell a real hoster page from a decoy. */
+    private const val TW_PROPS_PROBE_MS = 6_000L
+
+    /**
+     * Below this a body is an error stub, not a hoster page. Live decoys answer
+     * "! File Not Found" in 20 bytes; the smallest real page seen is ~19.6KB.
+     */
+    private const val TW_DECOY_PAGE_BYTES = 600
+
+    /**
+     * How long T4A rows are skipped after a decoy was detected. Its gate is the
+     * site's own captcha, so a retry cannot succeed until a human clears it in
+     * a browser; ten minutes keeps a re-skin or a cleared gate from waiting a
+     * whole session while never charging the viewer a request per menu pick.
+     */
+    private const val TW_GATE_TTL_MS = 10 * 60_000L
+
+    /** Millis until which ToonWorld4All is known to be serving its ad gate. */
+    @Volatile
+    private var twGateUntil = 0L
+
+    /**
+     * True while ToonWorld4All's files are known to be behind its captcha gate.
+     *
+     * Public on purpose: the player hides those rows from the server menu while
+     * it holds, so the viewer is never offered a row that cannot resolve and no
+     * batch spends a round trip on one.
+     */
+    fun twGated(): Boolean = System.currentTimeMillis() < twGateUntil
+
+    /**
+     * The hoster page a ToonWorld4All `/redirect/` token points at RIGHT NOW,
+     * or null while the site is still serving its captcha gate.
+     *
+     * This is the probe the unlock screen polls: the phone clears the gate on
+     * the site, and the next poll sees a real props target (a hoster page)
+     * instead of the decoy (the host's ~20-byte "File Not Found"). It is also
+     * what clears [twGateUntil], so the rows become resolvable again.
+     */
+    suspend fun twTokenTarget(tokenUrl: String): String? = withContext(Dispatchers.IO) {
+        if (!tokenUrl.contains("/redirect/", ignoreCase = true)) return@withContext null
+        val target = redirectTargetOf(tokenUrl) ?: return@withContext null
+        if (target.contains("mega.nz/", ignoreCase = true)) return@withContext null
+        val page = get(target, System.currentTimeMillis() + TW_PROPS_PROBE_MS)
+            ?: return@withContext null
+        if (page.length < TW_DECOY_PAGE_BYTES) return@withContext null
+        twGateUntil = 0L
+        target
+    }
 
     /** Reading Drive's confirmation page (one small HTML GET). */
     private const val DRIVE_BUDGET_MS = 10_000L

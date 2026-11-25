@@ -20,6 +20,16 @@ import me.desidubanime.tv.data.model.Playable
 import me.desidubanime.tv.data.model.Server
 import me.desidubanime.tv.data.model.ServerGroup
 
+/**
+ * A ToonWorld4All row that cannot resolve because the site is serving its
+ * captcha gate. Present while the phone-unlock screen owns the player.
+ */
+data class TwUnlockRequest(
+    val tokenUrl: String,
+    val hoster: String,
+    val option: PlayOption,
+)
+
 data class PlayerUiState(
     val loading: Boolean = true,
     val message: String? = null,
@@ -32,6 +42,8 @@ data class PlayerUiState(
     val hasPrev: Boolean = false,
     /** Exact intro/outro windows read from the MKV's chapter markers. */
     val skipWindows: MkvChapters.SkipWindows? = null,
+    /** Non-null -> the T4A phone unlock is on screen for that row. */
+    val twUnlock: TwUnlockRequest? = null,
 )
 
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
@@ -176,6 +188,37 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         me.desidubanime.tv.data.DebugLog.log("player", "subtitle added: ${track.label}")
     }
 
+    /**
+     * The viewer closed the unlock screen. The row stays locked: no TW option is
+     * retried behind their back, and nothing is left running.
+     */
+    fun cancelTwUnlock() {
+        if (_state.value.twUnlock != null) {
+            _state.value = _state.value.copy(
+                twUnlock = null,
+                message = "ToonWorld4All row is ad-locked — pick another server.",
+            )
+        }
+    }
+
+    /**
+     * The phone cleared T4A's gate and the file resolved. Keep it for this anime
+     * (every later T4A row then plays instantly) and start it now.
+     */
+    fun onTwUnlocked(stream: Playable.Stream) {
+        TwUnlockHolder.put(stream, PlaybackSession.animeId)
+        val req = _state.value.twUnlock
+        if (req != null) PlaybackSession.preferredServerLabel = req.option.stickyKey
+        _state.value = _state.value.copy(
+            selected = req?.option ?: _state.value.selected,
+            playable = stream,
+            loading = false,
+            message = null,
+            twUnlock = null,
+        )
+        fetchSkipWindows(stream)
+    }
+
     fun selectOption(option: PlayOption, fromPositionMs: Long = 0) {
         if (fromPositionMs > 0) PlaybackSession.resumePositionMs = fromPositionMs
         PlaybackSession.preferredServerLabel = option.stickyKey
@@ -230,9 +273,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val next = _state.value.options.firstOrNull { it !in tried }
                 if (next == null || tried.size >= MAX_PICK_FALLBACK) {
+                    // NOTHING PLAYED. If a ToonWorld4All row was involved, the
+                    // reason is almost always the site's captcha gate — so offer
+                    // the phone unlock instead of a bare "no working file".
+                    val twRow = if (current.isHub && (isTwSource(current.sourceLabel) ||
+                            me.desidubanime.tv.scrape.FileHostResolver.twGated())
+                    ) {
+                        TwUnlockRequest(current.embedUrl, current.hoster, current)
+                    } else {
+                        null
+                    }
                     _state.value = _state.value.copy(
                         loading = false,
                         playable = null,
+                        twUnlock = twRow,
                         message = withTwHint(
                             "${current.hoster} (${current.sourceLabel ?: "link"}) has no working file — pick another server.",
                         ),
@@ -240,10 +294,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 PlaybackSession.preferredServerLabel = next.stickyKey
-                _state.value = _state.value.copy(
-                    selected = next,
-                    message = "${current.hoster} had no working file — trying ${next.hoster}…",
-                )
+                                    _state.value = _state.value.copy(
+                        selected = next,
+                        message = if (isTwSource(current.sourceLabel)) {
+                            "ToonWorld4All row is ad-locked — trying ${next.hoster}…"
+                        } else {
+                            "${current.hoster} had no working file — trying ${next.hoster}…"
+                        },
+                    )
                 current = next
             }
         }
@@ -274,6 +332,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         allowBrowser: Boolean = false,
     ): Playable? {
         if (!option.isHub) return resolver.resolve(option.embedUrl, timeoutMs)
+        // An unlock already earned for this anime makes every T4A row instant.
+        if (isTwSource(option.sourceLabel)) {
+            TwUnlockHolder.take(PlaybackSession.animeId)?.let {
+                me.desidubanime.tv.data.DebugLog.log("resolve", "TW unlocked stream reused for this anime")
+                return it
+            }
+        }
         val direct = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
             me.desidubanime.tv.scrape.FileHostResolver.resolve(
                 pageUrl = option.embedUrl,
@@ -350,11 +415,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** Append the TW4A unlock hint when this episode had TW servers in play. */
     private fun withTwHint(base: String): String =
         if (twAttempted) {
-            // ToonWorld4All resolves through its /redirect/ token over plain
-            // HTTP, so no unlock step is required. Only a genuinely dead row
-            // offers the QR sheet, and the menu should never send the viewer to
-            // watch ads before trying another server.
-            "$base\nToonWorld4All: try a HubCloud or GDFlix row from the server list."
+            // The truth, measured: T4A serves decoy file ids until its own
+            // shortener captcha is solved, so no row can be unlocked from here.
+            // Saying so beats pointing at rows that will fail the same way.
+            "$base\nToonWorld4All locks its files behind an ad captcha on its site, so those rows cannot play directly."
         } else base
 
     /**
@@ -480,8 +544,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * leaving the sheet empty.
      */
     private fun visibleOptions(options: List<PlayOption>): List<PlayOption> {
+        // T4A's files sit behind its own captcha gate. While that gate is up
+        // every one of its rows is unplayable, so they are hidden rather than
+        // offered: a row that can only fail is worse than no row, and the same
+        // verdict keeps the resolve batches from spending a request on each.
+        val twGated = me.desidubanime.tv.scrape.FileHostResolver.twGated()
         val visible = options.filterNot {
-            it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster)
+            if (!it.isHub) return@filterNot false
+            if (twGated && isTwSource(it.sourceLabel)) return@filterNot true
+            me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster)
         }
         if (visible.size != options.size) {
             me.desidubanime.tv.data.DebugLog.log(
@@ -608,7 +679,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             PlaybackSession.preferredServerLabel = fb.stickyKey
             _state.value = _state.value.copy(selected = fb, playable = embeds.getValue(fb), loading = false, message = null)
         } else {
-            _state.value = _state.value.copy(loading = false, message = withTwHint("Could not start any server."))
+            // Only when the gate is KNOWN to be up (one cheap probe already paid
+            // for by a TW row): otherwise this would pop a QR on every failed
+            // resolve, including episodes that simply have no T4A row.
+            val twRow = if (me.desidubanime.tv.scrape.FileHostResolver.twGated()) {
+                ordered.firstOrNull { it.isHub && isTwSource(it.sourceLabel) }
+            } else {
+                null
+            }
+            _state.value = _state.value.copy(
+                loading = false,
+                message = withTwHint("Could not start any server."),
+                twUnlock = twRow?.let { TwUnlockRequest(it.embedUrl, it.hoster, it) },
+            )
         }
     }
 

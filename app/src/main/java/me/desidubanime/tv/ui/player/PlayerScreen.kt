@@ -291,6 +291,16 @@ fun PlayerScreen(
             .focusable()
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // The unlock screen owns the remote while it is up: its buttons
+                // need OK and the D-pad, and BACK must cancel it.
+                if (vm.state.value.twUnlock != null) {
+                    return@onPreviewKeyEvent if (e.key == Key.Back) {
+                        vm.cancelTwUnlock()
+                        true
+                    } else {
+                        false
+                    }
+                }
                 // The failure card's buttons own the remote: OK and the D-pad
                 // must reach them, so transport handling stands down.
                 if (playError != null) return@onPreviewKeyEvent false
@@ -533,6 +543,17 @@ fun PlayerScreen(
         }
         if (showLogs) {
             PlayerLogPanel(Modifier.align(Alignment.BottomStart))
+        }
+
+        // ToonWorld4All's files cannot be fetched without passing the site's
+        // captcha, and only a person can pass it. This is the hand-off: the
+        // phone solves it, the TV picks the file up and plays.
+        state.twUnlock?.let { req ->
+            me.desidubanime.tv.ui.tw.TwUnlockScreen(
+                tokenUrl = req.tokenUrl,
+                onUnlocked = { stream -> vm.onTwUnlocked(stream) },
+                onClose = { vm.cancelTwUnlock() },
+            )
         }
     }
 }

@@ -1224,3 +1224,51 @@ KNOWN LIMITATIONS (ab bhi ho sakta hai)
    click maangta hai — auto-tap center pe hota hai; OK dabao.
 4. Purane HubCloud uploads ke saare mirrors dead hon to HubCloud
    skip → DDA servers se chalta hai (site-side issue).
+
+================================================================
+SECTION F — v1.2.5: TOONWORLD4ALL GATE MEASURED, PHONE UNLOCK REBUILT
+================================================================
+MEASURED LIVE (2026-11-25, archive.toonworld4all.me)
+- Episode __PROPS__ still lists 4 hosters per quality (HubCloud, GDFlix,
+  Filepress, MEGA), each behind an opaque /redirect/<128 hex> token.
+- A FRESH visitor's token view answers 200 + window.__PROPS__; every later
+  token view for that same visitor 302s to one shortener per episode
+  (shrinkme.click/a87My), where the site sets user / pending_verify /
+  popup_expiry. => read each token with NO cookies.
+- The props link.hidden is a DECOY: it changes on every request and has the
+  same length as the real id. Proven three ways: two fresh requests to the
+  same token returned different ids; those ids 404 on hubcloud.mov (20-byte
+  "File Not Found") while the same show's ADH ids answer 200 (19.6 KB); and
+  gdflix answers its own "file no longer available" shell for them.
+- The destination is a Cloudflare Turnstile gate (captcha_type: turnstile,
+  cf-turnstile-response EMPTY, Continue disabled). Checked in a real
+  Chromium: it stays locked until a human ticks the box. Crawler UAs, the
+  .data route, referer spoofing and HEAD/GET do not help either.
+=> No app-side bypass exists. T4A files need ONE human solve on a phone.
+
+WHAT THE APP DOES NOW
+- /redirect/: one cookie-less GET -> props -> ONE cheap GET of the props
+  target. A tiny body (<600b) proves the decoy; the row ends there and the
+  player falls through to the next server. No WebView, no ad page, no QR
+  wall on a normal pick, and no 45s spinner.
+- While the gate is known (10-min memo) T4A rows fail in microseconds and are
+  hidden from the server menu when another source can play.
+- Phone unlock (rebuilt): ONE QR = the episode's own /redirect/ page. The
+  phone solves the ads; the TV polls that token every 4s and starts playing
+  the moment the site serves a real hoster page. If the site binds the unlock
+  to the phone's cookies, an optional second QR opens a private ntfy topic
+  and the phone sends the file page URL it ended on. Success is cached per
+  anime for 15 min, so later T4A rows play instantly.
+- UI: full-screen, 10-foot readable, numbered steps, live phase + attempt
+  counter, Check now / Send link / Cancel, BACK cancels. Network on IO, QR
+  encoding off the main thread, all polling cancelled with the screen.
+- GDFlix's sub-second "no stream": that was a T4A decoy id landing on
+  GDFlix's own 404 page. It is now detected at the T4A token instead of
+  being blamed on GDFlix, and the next server is tried automatically.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS — 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,311,303 bytes)
+NOT VERIFIED (no adb/device): on-TV rendering/focus of the unlock screen, a
+real phone solve, and the relay round trip.
