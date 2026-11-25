@@ -1,12 +1,178 @@
 ================================================================
-DESIDUBANIME TV — FIXES REPORT (latest update: 2026-11-24 #9)
+DESIDUBANIME TV — FIXES REPORT (latest update: 2026-11-25 #8)
 ================================================================
 Yeh file batati hai ki is project me kya-kya fix hua, kya nahi
 hua, aur kyu. Har fix ka technical reason bhi likha hai.
 
 APK: app/build/outputs/apk/debug/app-debug.apk
-  Last build: 2026-08-08 (BUILD SUCCESSFUL, ~22.8 MB, debug)
+  Last build: 2026-11-25 (BUILD SUCCESSFUL, 22.2 MB, v1.2.3 / versionCode 6, debug)
   Build command: gradlew.bat :app:assembleDebug --no-daemon
+
+================================================================
+SECTION 00008 - v1.2.3: GDFlix + T4A re-verified live, three main-thread
+                           stalls removed
+
+WHAT WAS TESTED LIVE (2026-11-25, plain HTTP from a PC)
+
+  GDFlix, 3 uploads sampled from As a Reincarnated Aristocrat S3:
+    page  gdflix.vip/file/<id> -> 302 -> new10.gdflix.io/file/<id>, 43.5-44 KB
+    key   formData.append("key", "<40 hex>")            (still present)
+    mint  POST /mfile/<id>  action=instant -> {"error":false,"info":"Success",
+          "url":"https:\/\/video-downloads..."}  in ~1 s
+    file  GET that url -> 200, Content-Type video/mkv, Content-Length
+          89,757,851 and 146,060,302 for two of the three
+  => the GDFlix protocol implemented in the app is CORRECT and still works.
+     What a viewer hits is either a deleted Drive copy (mint succeeds, the
+     file answers 400) or a page fetch that loses its TLS handshake; both
+     now fail fast and FALL FORWARD instead of dead-ending.
+
+  ToonWorld4All, live structure:
+    catalogue  toonworld4all.me/<slug>/  (anime pages)
+    episodes   archive.toonworld4all.me/episode/<slug>-<s>x<n>
+    page data  window.__PROPS__ = {"data":{"data":{"encodes":[{"files":
+               [{"host","link":"/redirect/<128 hex>","short"}]}]}}}
+               -> the app's parse still matches this shape exactly.
+    token      GET /redirect/<hex> -> 200, 14 KB, __PROPS__ =
+               {"destination":"https://shrinkme.click/ofmX9plu",
+                "link":{"domain":"https://hubcloud.mov/drive/","hidden":"<id>"},
+                "total":4}
+  Two shows checked (Blue Box S2E1, Whats New Scooby-Doo S1E1), every host:
+    HubCloud   hubcloud.mov/drive/<id> -> 404 "404 ! File Not Found"
+               (the SAME host answered 200 / 19.6 KB for ADH drive ids in the
+               same minute, so T4A's uploads are deleted, not a resolver bug)
+    GDFlix     /redirect/ -> 302 -> shrinkme.click/<slug>: an ad + captcha
+               shortener (form POST with _csrfToken); no file URL in the HTML
+    FilePress  newN.filepress.lat refuses connections
+    MEGA       no file key in the token at all
+  => ToonWorld4All currently has NO plain-HTTP-playable server. That is
+     site-side. The app drops MEGA/FilePress rows, tries HubCloud and GDFlix
+     over HTTP first, and - new in this build - refuses to open the phone/QR
+     wall for a token whose host answered 404.
+
+FIXES IN THIS BUILD
+
+4. NO QR WALL FOR A DELETED T4A FILE
+   FileHostResolver remembers a /redirect/ token whose real host answers
+   404/410 (10 min TTL) and PlayerViewModel skips the unlock sheet for it,
+   showing the plain failure with an ADH/AD hint instead. The old code
+   answered a deleted file with an ad wall that could never become a stream.
+
+5. SeenStore WAS READ FROM THE COMPOSITION THREAD
+   HomeSections calls firstRunAt() plus a seenStamp() per card. The first call
+   parsed /seen_state.json - disk I/O in the middle of the Home grid's first
+   frame. App.onCreate now warms it on the IO scope before Home composes.
+
+6. DetailViewModel DID A JSON FILE READ/WRITE ON MAIN
+   viewModelScope launches on Main, and seen.lastSeen()/setLastSeen() read
+   and rewrote the store there - on every detail open and on the OK press
+   that also starts the player. Both paths now run on IO.
+
+7. SUBTITLE DELAY REWROTE FILES ON THE FRAME THREAD
+   The -0.1s/+0.1s buttons read, regex-rewrote and wrote every local
+   subtitle inside onClick while ExoPlayer was decoding. Moved to IO with
+   the result published back on Main.
+
+CHECKS
+   :app:compileDebugKotlin   BUILD SUCCESSFUL
+   :app:searchCheck          PASS - 19 checks
+   live protocol tests       as listed above
+NOT VERIFIED
+   Device playback (no adb): the fall-through message, the T4A failure copy
+   and the subtitle delay buttons were compiled, not exercised on a TV.
+
+================================================================
+SECTION 00007 - v1.2.3: PICKED SERVER FALLS FORWARD, T4A DEAD ROWS
+
+WHAT WAS TESTED LIVE (2026-11-24, from a PC over plain HTTP)
+
+  AnimeDubHindi episode page (new.adhlinks.com -> As a Reincarnated
+  Aristocrat S3) now points at:
+    27 x hubcloud.mov/drive/<id>     -> 200, 19 KB, real page
+    27 x gdflix.vip/file/<id>        -> 302 -> new10.gdflix.io, 43 KB, real page
+     6 x filebee.live/file/<id>      -> dead origin
+  hubcloud.cx NO LONGER RESOLVES (DNS gone) - hubcloud.mov is the live domain.
+
+  GDFlix's current protocol still works and is TWO requests:
+    page   -> formData.append("key", "<40 hex>")   (key IS in the HTML)
+    POST   <host>/mfile/<id>  action=instant & key & action_token=""
+           header x-token: <host>   ->  {"url":"https://video-downloads
+           .googleusercontent.com/..."}   in 0.9s
+    that url answers 200 with Content-Type video/mkv and the full byte
+    count (it IGNORES Range, which the prober already treats as a file).
+  So GDFlix is not broken - but ONE of the four links of that episode minted
+  a Drive URL that answers 400 for everybody (deleted upload), and the SITE's
+  own page for a deleted upload is a 200 "The file ... is no longer available".
+  That is the case the app used to sit on for 20-60s (key missing -> generic
+  crawl -> a whole WebView unlock round) and then report "no stream".
+
+FIXES
+
+1. A PICKED SERVER NEVER DEAD-ENDS  (PlayerViewModel.selectOption)
+   Picking a server that yields nothing now FALLS FORWARD through the server
+   list (up to 3 tries, the pick itself keeps the full 45s budget, fallbacks
+   get 22s) and plays the next one. The old code stopped at the first
+   failure with "<hoster> returned no stream - pick another server" while
+   ten healthy rows were visible in the menu.
+
+2. GDFlix: A REMOVED UPLOAD FAILS IN ~1.5s, NOT 20-60s
+   The mint step now recognises the site's "file no longer available" page
+   and returns immediately instead of falling through to the generic crawl
+   and a browser session that cannot resurrect a deleted file.
+
+3. ToonWorld4All: DEAD-ONLY ROWS ARE NO LONGER OFFERED
+   A T4A card is an opaque /redirect/<token>; its __PROPS__ carries
+   {"link":{"domain","hidden"}}. Verified against four episodes: the MEGA
+   rows carry NO file key (mega.nz + a 56-char opaque id; the file API
+   answers ENOENT), and the FilePress rows point at newN.filepress.lat, which
+   refuses connections. Both families are now dropped at scrape time, so they
+   cannot become rows that can only fail and cannot drag the viewer into the
+   ad/QR wall. HubCloud + GDFlix rows stay.
+   The QR unlock is now a LAST RESORT: it only opens after every fallback
+   server failed, and only for a T4A /redirect/ row - never as the first
+   reaction to a failed pick.
+
+4. REDIRECT TOKEN: ONE SHARED DEADLINE
+   The T4A branch used to hand its nested resolve the FULL budget again, so
+   one token could burn 45s in the unwrap and another 45s in the target.
+   It now passes only the time that is actually left.
+
+5. WRAPPER URLs ARE UNWRAPPED BEFORE DISPATCH
+   link.animedrive.me/dl/<base64> and ?url=/<file>=/<link>= wrappers used to
+   reach the host-specific resolvers (GDFlix mint, HubCloud two-hop), which
+   then parsed a wrapper page and found nothing. They are unwrapped once at
+   the top of FileHostResolver.resolve and re-dispatched with the right
+   hoster, using the remaining budget.
+
+6. hubcloud.cx -> live domain
+   The phone-unlock referer and the pixel-redirect hop now derive their
+   referer from the actual file URL (hubcloud.mov), instead of pinning a
+   domain that no longer resolves.
+
+PERFORMANCE
+
+7. CRASH-LOG READ MOVED OFF THE MAIN THREAD (App.onCreate)
+   Reading last_crash.txt and appending up to 90 log lines ran synchronously
+   in onCreate - storage I/O in front of the first frame.
+
+8. PLAYER NO LONGER RECOMPOSES ON EVERY LOG LINE (PlayerScreen)
+   DebugLog.lines was collected at the top of PlayerScreen, so each of the
+   dozens of resolve log lines recomposed the whole player while ExoPlayer
+   was starting. The log panel now collects it itself.
+
+9. HERO IMAGES DECODE AT THE SIZE THEY ARE DRAWN (HeroSection)
+   The 240dp banner was requesting 1280x720 (~3.7 MP) per slide and also
+   rebuilding its ImageRequest on every recomposition of the 6s rotation.
+   Backdrop is 640x360, the +/- poster 256x384, both remembered per URL.
+
+CHECKS
+  :app:compileDebugKotlin  BUILD SUCCESSFUL
+  :app:searchCheck         PASS - 19 checks
+  :app:assembleDebug       see the release note below
+
+NOT VERIFIED (no adb / no TV box here): real playback of each provider on
+  the TV, the fall-through message on screen, and ToonWorld4All content
+  itself - T4A's own file ids currently 404 on hubcloud.mov and its gdflix
+  copies are deleted, which is site-side, not app-side.
 
 ================================================================
 SECTION 00006 - PROVIDER TAGS ON EVERY CARD, IMMEDIATELY

@@ -70,9 +70,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var twAttempted = false
 
-    /** TW option awaiting phone-unlock (QR sheet) + where playback was. */
+    /** TW option that offered the phone unlock (QR sheet), kept for the resume. */
     private var pendingTw: PlayOption? = null
-    private var pendingTwPosMs: Long = 0
     /** Episode-start wall clock â€” caps TOTAL resolve time so weak boxes never sit in minutes-long unlock loops (user-reported full-TV reboots). */
     private var episodeStartedAt = 0L
 
@@ -228,7 +227,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     url = held,
                     headers = mapOf(
                         "User-Agent" to me.desidubanime.tv.data.api.Api.USER_AGENT,
-                        "Referer" to "https://hubcloud.cx/",
+                        // hubcloud.cx stopped resolving (verified 2026-11); the
+                        // live family is hubcloud.mov. Derive the referer from
+                        // the actual file URL so a future rotation keeps working.
+                        "Referer" to (
+                            (Regex("""^(https?://[^/]+)""").find(held)?.groupValues?.get(1)
+                                ?: "https://hubcloud.mov") + "/"
+                            ),
                     ),
                     isHls = false,
                 ),
@@ -240,35 +245,81 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
-            val playable = try {
-                resolveOption(option, timeoutMs = MANUAL_RESOLVE_MS, allowBrowser = true)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                null
-            } ?: if (option.isHub) {
-                // QR marker = a /redirect/ token URL (T4A). Whatever the label
-                // or source claims, only the episode owning the token unlocks.
-                if (option.embedUrl.contains("/redirect/", ignoreCase = true)) {
-                    pendingTw = option
-                    pendingTwPosMs = fromPositionMs
+            // A PICKED SERVER THAT HAS NO WORKING FILE MUST NOT DEAD-END.
+            // Resolution stopped on the first failure ("… returned no stream —
+            // pick another server") even with ten healthy rows sitting in the
+            // menu, and a T4A row that failed threw the ad/QR wall on top of
+            // it. Now a failure FALLS FORWARD through the preference order, so
+            // picking GDFlix on an episode whose Drive copy was deleted simply
+            // plays the next server instead of showing an error.
+            val tried = LinkedHashSet<PlayOption>()
+            var current = option
+            while (true) {
+                tried += current
+                val resolved = try {
+                    // The pick the viewer made gets the full budget; a fallback
+                    // server has to be quicker than that or the pick feels
+                    // stuck, so later attempts run on a tighter leash.
+                    resolveOption(
+                        current,
+                        timeoutMs = if (tried.size == 1) MANUAL_RESOLVE_MS else FALLBACK_RESOLVE_MS,
+                        allowBrowser = true,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    null
+                } ?: if (current.isHub) null else Playable.Embed(current.embedUrl)
+                if (resolved != null) {
+                    PlaybackSession.preferredServerLabel = current.stickyKey
+                    _state.value = _state.value.copy(
+                        selected = current,
+                        playable = resolved,
+                        loading = false,
+                        message = null,
+                    )
+                    fetchSkipWindows(resolved)
+                    return@launch
+                }
+                val next = _state.value.options.firstOrNull { it !in tried }
+                if (next == null || tried.size >= MAX_PICK_FALLBACK) {
+                    // Everything failed. Only NOW — as a last resort, with no
+                    // other server left to try — offer the phone unlock for a
+                    // T4A /redirect/ row. A dead file never opens it.
+                    if (option.isHub &&
+                        isTwSource(option.sourceLabel) &&
+                        option.embedUrl.contains("/redirect/", ignoreCase = true) &&
+                        // A DELETED FILE HAS NOTHING TO UNLOCK. When the token's
+                        // real host answered 404 (verified live: T4A's HubCloud
+                        // copies are gone site-side), the phone/QR sheet could
+                        // only sell an ad that never becomes a stream, so the
+                        // viewer gets the plain failure instead.
+                        !me.desidubanime.tv.scrape.FileHostResolver.isDeadTwToken(option.embedUrl)
+                    ) {
+                        pendingTw = option
+                        _state.value = _state.value.copy(
+                            loading = false,
+                            playable = null,
+                            twUnlockUrl = option.embedUrl,
+                        )
+                        return@launch
+                    }
                     _state.value = _state.value.copy(
                         loading = false,
                         playable = null,
-                        twUnlockUrl = option.embedUrl,
+                        message = withTwHint(
+                            "${current.hoster} (${current.sourceLabel ?: "link"}) has no working file — pick another server.",
+                        ),
                     )
                     return@launch
                 }
+                PlaybackSession.preferredServerLabel = next.stickyKey
                 _state.value = _state.value.copy(
-                    loading = false,
-                    message = "${option.hoster} (${option.sourceLabel ?: "link"}) returned no stream — pick another server.",
+                    selected = next,
+                    message = "${current.hoster} had no working file — trying ${next.hoster}…",
                 )
-                return@launch
-            } else {
-                Playable.Embed(option.embedUrl)
+                current = next
             }
-            _state.value = _state.value.copy(playable = playable, loading = false)
-            fetchSkipWindows(playable)
         }
     }
 
@@ -377,7 +428,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // HTTP, so no unlock step is required. Only a genuinely dead row
             // offers the QR sheet, and the menu should never send the viewer to
             // watch ads before trying another server.
-            "$base\nToonWorld4All: try a HubCloud or GDFlix row from the server list."
+            "$base\nT4A rows resolve directly when the site's file is alive; if all of " +
+                "them failed, the upload is gone from the site — use an ADH or AD server."
         } else base
 
     /**
@@ -719,6 +771,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
         /** Total wall-clock the whole resolve may take before unlock phases are skipped. */
         const val EPISODE_RESOLVE_CAP_MS = 100_000L
+
+        /**
+         * Servers a single pick may fall through before it gives up. Two is
+         * enough to survive one dead host without turning a pick into a full
+         * auto-resolve pass.
+         */
+        const val MAX_PICK_FALLBACK = 3
+
+        /** Budget for the 2nd/3rd server a failed pick falls through to. */
+        const val FALLBACK_RESOLVE_MS = 22_000L
     }
 }
 

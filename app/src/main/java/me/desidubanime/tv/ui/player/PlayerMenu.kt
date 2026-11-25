@@ -91,6 +91,28 @@ fun PlayerMenu(
     // .srt cannot be rewritten and the row is hidden rather than lying.
     val localSubs = stream?.subtitles?.filter { it.url.startsWith("file:") }.orEmpty()
 
+    /**
+     * Rewriting a subtitle is a read + regex pass + write per track, and it runs
+     * while ExoPlayer is decoding video. It used to sit directly in the button's
+     * onClick, i.e. on the frame thread, so every delay tap hitched playback.
+     * Do the file work on IO and only publish the result on Main.
+     */
+    fun shiftSubs(deltaMs: Long) {
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ok = runCatching { localSubs.all { shiftSubtitleFile(it.url, deltaMs) } }
+                .getOrDefault(false)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                if (ok) {
+                    subDelayMs += deltaMs
+                    subDelayNote = null
+                    onSubtitleShifted()
+                } else {
+                    subDelayNote = "This subtitle format can't shift"
+                }
+            }
+        }
+    }
+
     if (finding) {
         SubtitleFinder(
             onClose = { finding = false },
@@ -216,30 +238,8 @@ fun PlayerMenu(
                                     Modifier.padding(top = 6.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    Button(onClick = {
-                                        subDelayNote = runCatching {
-                                            val ok = localSubs.all { shiftSubtitleFile(it.url, -100) }
-                                            if (ok) {
-                                                subDelayMs -= 100
-                                                onSubtitleShifted()
-                                                null
-                                            } else {
-                                                "This subtitle format can't shift"
-                                            }
-                                        }.getOrDefault("This subtitle format can't shift")
-                                    }) { Text("-0.1s") }
-                                    Button(onClick = {
-                                        subDelayNote = runCatching {
-                                            val ok = localSubs.all { shiftSubtitleFile(it.url, 100) }
-                                            if (ok) {
-                                                subDelayMs += 100
-                                                onSubtitleShifted()
-                                                null
-                                            } else {
-                                                "This subtitle format can't shift"
-                                            }
-                                        }.getOrDefault("This subtitle format can't shift")
-                                    }) { Text("+0.1s") }
+                                    Button(onClick = { shiftSubs(-100) }) { Text("-0.1s") }
+                                    Button(onClick = { shiftSubs(100) }) { Text("+0.1s") }
                                 }
                                 subDelayNote?.let {
                                     Text(

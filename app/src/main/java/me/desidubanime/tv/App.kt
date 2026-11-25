@@ -26,6 +26,14 @@ class App : Application(), ImageLoaderFactory {
         // the app felt sticky right after opening. Nothing needs the host before
         // a request is made: WpService's interceptor resolves Api.HOST per call,
         // and this runs before the first one.
+        // Warm the seen-state store off the main thread. Its first call parses
+        // /seen_state.json, and the first call is made from the Home grid's
+        // composition (firstRunAt + a lookup per poster). Doing it here means
+        // the grid reads an in-memory map instead of touching the disk while it
+        // is trying to paint its first frames.
+        me.desidubanime.tv.data.ServiceLocator.appScope.launch {
+            runCatching { me.desidubanime.tv.data.ServiceLocator.seenStore.firstRunAt() }
+        }
         me.desidubanime.tv.data.ServiceLocator.appScope.launch {
             runCatching {
                 me.desidubanime.tv.data.api.Api.setHost(
@@ -66,7 +74,12 @@ class App : Application(), ImageLoaderFactory {
             }
         }
         // Surface the previous run's crash into the visible diagnostic log.
-        if (crashFile.exists()) {
+        // OFF THE MAIN THREAD: this is a file read plus up to 90 log appends,
+        // and running it inside onCreate() put storage I/O in front of the
+        // first frame — exactly the "sticky right after opening" feel a cold
+        // start on a slow TV box has.
+        me.desidubanime.tv.data.ServiceLocator.appScope.launch {
+            if (!crashFile.exists()) return@launch
             runCatching {
                 crashFile.readText().lineSequence()
                     .filter { it.isNotBlank() }

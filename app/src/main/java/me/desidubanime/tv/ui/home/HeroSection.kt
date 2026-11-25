@@ -87,10 +87,18 @@ fun HeroSection(
             transitionSpec = { fadeIn() togetherWith fadeOut() },
             label = "hero",
         ) { anime ->
+            // One request per slide, not per recomposition. heroImage() used to
+            // be called inline, so every recompose of the rotating banner built
+            // a fresh ImageRequest and re-ran the pipeline; on a 1GB TV box the
+            // crossfade at 1280x720 was also decoding ~3.7MP per slide for a
+            // 240dp strip. The decode size now matches what is actually drawn.
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            val backdrop = remember(anime.posterUrl) { heroImage(ctx, anime.posterUrl, 640, 360) }
+            val poster = remember(anime.posterUrl) { heroImage(ctx, anime.posterUrl, 256, 384) }
             Box(Modifier.fillMaxSize()) {
                 // Backdrop: the poster blown up + darkened, so every anime has art.
                 AsyncImage(
-                    model = heroImage(anime),
+                    model = backdrop,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     alpha = 0.35f,
@@ -161,7 +169,7 @@ fun HeroSection(
                     }
                     // Foreground poster card on the right.
                     AsyncImage(
-                        model = heroImage(anime),
+                        model = poster,
                         contentDescription = anime.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
@@ -189,16 +197,21 @@ private fun Dots(count: Int, active: Int) {
     }
 }
 
-@Composable
-private fun heroImage(anime: Anime): ImageRequest {
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    return ImageRequest.Builder(ctx)
-        .data(anime.posterUrl.ifBlank { null })
-        .size(1280, 720)                    // hero backdrop is ~720p on TV
-        .addHeader("User-Agent", Api.USER_AGENT)
-        .addHeader("Referer", Api.REFERER)
-        .crossfade(true)
-        .build()
-}
+/**
+ * Hero image request at the size it is drawn at. `allowHardware` keeps the
+ * bitmap in GPU memory so the 6s rotation never copies it back to the heap.
+ */
+private fun heroImage(
+    ctx: android.content.Context,
+    url: String,
+    width: Int,
+    height: Int,
+): ImageRequest = ImageRequest.Builder(ctx)
+    .data(url.ifBlank { null })
+    .size(width, height)
+    .addHeader("User-Agent", Api.USER_AGENT)
+    .addHeader("Referer", Api.REFERER)
+    .crossfade(true)
+    .build()
 
 private const val ROTATE_MS = 6_000L

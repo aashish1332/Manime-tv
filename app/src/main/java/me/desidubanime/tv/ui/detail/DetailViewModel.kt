@@ -57,9 +57,16 @@ class DetailViewModel : ViewModel() {
                 // that episode is actually watched, so "which ones are new"
                 // survives multiple visits and multi-episode drops. First-ever
                 // open records a baseline instead of flooding a fresh install.
-                val lastSeen = seen.lastSeen(animeId)
                 val maxNow = eps.maxOfOrNull { it.numberInt } ?: 0
-                if (lastSeen == null && maxNow > 0) seen.setLastSeen(animeId, maxNow)
+                // SeenStore is a JSON file on disk, and viewModelScope launches
+                // on Main: read it (and write the first-run baseline) on IO, or
+                // every detail open pays a disk read/write in front of its
+                // first frame.
+                val lastSeen = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val prev = seen.lastSeen(animeId)
+                    if (prev == null && maxNow > 0) seen.setLastSeen(animeId, maxNow)
+                    prev
+                }
                 // Resume state: the Continue Watching entry for THIS anime tells
                 // us which episode was part-watched and how far in. Only one
                 // episode per anime is tracked, which is exactly what a resume
@@ -106,8 +113,13 @@ class DetailViewModel : ViewModel() {
     /** The user pressed play on an episode — its NEW badge (and everything
      *  below it) clears; badges above stay until those are played too. */
     fun markPlayed(animeId: Int, episodeNumber: Int) {
-        val prev = seen.lastSeen(animeId) ?: 0
-        if (episodeNumber > prev) seen.setLastSeen(animeId, episodeNumber)
+        // Called from the OK handler that opens the player. The write is a
+        // whole JSON file, so it must not run on the thread that is also
+        // starting playback.
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val prev = seen.lastSeen(animeId) ?: 0
+            if (episodeNumber > prev) seen.setLastSeen(animeId, episodeNumber)
+        }
         (_state.value as? UiState.Success)?.let { cur ->
             if (cur.data.anime.id == animeId) {
                 val base = cur.data.newAboveEpisode

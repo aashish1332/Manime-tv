@@ -192,6 +192,20 @@ object FileHostResolver {
         }
         DebugLog.log("resolve", "$hoster start budget=${budgetMs}ms ${short(pageUrl)}")
         DebugLog.log("resolve", "Browser available: ${browser != null}")
+        // WRAPPER URLs NEVER REACH A HOST RESOLVER. AnimeDrive hands out
+        // link.animedrive.me/dl/<base64> tokens and some mirrors hand out
+        // ?url=<real> redirects; the host-specific paths below (GDFlix mint,
+        // HubCloud two-hop, page crawl) only make sense on the REAL page, so
+        // unwrap once, here, and recurse with the budget that is left.
+        if (pageUrl.contains("link.animedrive.me/dl/", ignoreCase = true) ||
+            Regex("""[?&](?:url|link|file|target)=""", RegexOption.IGNORE_CASE).containsMatchIn(pageUrl)
+        ) {
+            val real = unwrap(pageUrl)
+            if (real != pageUrl && real.startsWith("http") && msLeft(deadline) >= 1_000L) {
+                DebugLog.log("resolve", "unwrapped -> ${short(real)}")
+                return@withContext resolve(real, hosterFromUrl(real, hoster), msLeft(deadline), browser)
+            }
+        }
         // ToonWorld4All wraps every link in an OPAQUE /redirect/<hex> token.
         // Its interstitial embeds the real target as JSON:
         //   window.__PROPS__ = {"destination":"https://exe.io/…"(ad),
@@ -212,9 +226,21 @@ object FileHostResolver {
         // playable, control fell into the browser flow — the ad/QR wall.
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
             val target = redirectTargetOf(pageUrl)
+            if (target != null && target.contains("mega.nz/", ignoreCase = true)) {
+                // MEGA CANNOT BE RESOLVED THIS WAY, AND PRETENDING OTHERWISE
+                // COSTS THE VIEWER A QR WALL. A T4A MEGA card carries no file
+                // key, so domain+hidden builds a mega.nz page with no key and
+                // no bytes behind it (verified live: the constructed link is
+                // a "File on MEGA" shell and the file API answers ENOENT).
+                DebugLog.log("resolve", "redirect -> MEGA (no key in token, unsupported)")
+                return@withContext null
+            }
             if (target != null && !target.contains("/redirect/", ignoreCase = true)) {
                 DebugLog.log("resolve", "redirect -> ${short(target)} (direct, no ad/QR)")
-                resolve(target, hosterFromUrl(target, hoster), budgetMs, browser)?.let {
+                // SHARED DEADLINE. This used to hand the nested resolve the
+                // FULL budget again, so one T4A token could burn 45s here and
+                // another 45s below before the viewer saw anything.
+                resolve(target, hosterFromUrl(target, hoster), msLeft(deadline), browser)?.let {
                     DebugLog.log("resolve", "redirect resolved -> ${short(it.url)}")
                     return@withContext it
                 }
@@ -222,6 +248,14 @@ object FileHostResolver {
                 // Plain HTTP only: the browser hop here IS the QR flow, and it
                 // must never be reached implicitly.
                 crawl(target, deadline, browser = null)?.let { return@withContext it }
+                // DEFINITIVE 404 = the upload is GONE, not ad-gated. Verified
+                // live 2026-11: T4A's HubCloud tokens build
+                // hubcloud.mov/drive/<id> and that URL answers "404 ! File Not
+                // Found" for every card of every episode checked, while the
+                // same host resolves ADH's ids fine. Nothing behind a deleted
+                // file can be unlocked, so the player must not answer it with
+                // the phone/QR ad wall — remember the verdict for that token.
+                if (answersGone(target)) markTwDeadFile(pageUrl)
                 DebugLog.log("resolve", "redirect target unresolved -> ${short(target)}")
                 return@withContext null
             }
@@ -271,9 +305,19 @@ object FileHostResolver {
             // the plain-HTTP fallback below.
             val instantBudget = msLeft(deadline).coerceAtMost(12_000L)
             if (instantBudget >= 1_000L) {
-                kotlinx.coroutines.withTimeoutOrNull(instantBudget) { gdflixInstant(pageUrl) }?.let {
+                val mint = kotlinx.coroutines.withTimeoutOrNull(instantBudget) { gdflixInstant(pageUrl) }
+                mint?.stream?.let {
                     DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
                     return@withContext it
+                }
+                if (mint?.removed == true) {
+                    // The upload is GONE (site's own "file no longer
+                    // available" page). No browser session can bring it back,
+                    // so the 15-60s WebView pass below would only be dead
+                    // waiting — which is what the viewer saw as "GDFlix says
+                    // no stream found right after selecting it".
+                    DebugLog.log("resolve", "GDFlix: upload removed site-side — not worth a browser pass")
+                    return@withContext null
                 }
             }
             try {
@@ -1361,12 +1405,16 @@ object FileHostResolver {
      * answer {"error":true,"message":"Direct Download not Enabled!"} on files
      * that don't offer them, which is why they are only tried afterwards.
      */
-    private suspend fun gdflixInstant(pageUrl: String): Playable.Stream? = withContext(Dispatchers.IO) {
-        val fetched = fetchFollowing(pageUrl) ?: return@withContext null
+    private suspend fun gdflixInstant(pageUrl: String): GdfMint = withContext(Dispatchers.IO) {
+        val fetched = fetchFollowing(pageUrl) ?: return@withContext GdfMint()
         val (finalUrl, html) = fetched
         if (looksLikeChallenge(html)) {
             DebugLog.log("gdflix", "challenge on ${short(finalUrl)}")
-            return@withContext null
+            return@withContext GdfMint()
+        }
+        if (isRemovedUpload(html)) {
+            DebugLog.log("gdflix", "upload removed: ${short(finalUrl)}")
+            return@withContext GdfMint(removed = true)
         }
         // Key is double-quoted inside formData.append — a page without it is
         // the site's generic shell (file removed), so bail early.
@@ -1377,8 +1425,8 @@ object FileHostResolver {
                 DebugLog.log("gdflix", "no key on page (${html.length}b) — likely removed upload")
                 null
             }
-            ?: return@withContext null
-        val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: return@withContext null
+            ?: return@withContext GdfMint(removed = isRemovedUpload(html))
+        val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: return@withContext GdfMint()
         val tokenHost = host.removePrefix("https://").removePrefix("http://")
         val mPath = if (finalUrl.contains("/file/")) finalUrl.replace("/file/", "/mfile/") else finalUrl
         for ((action, target) in listOf("instant" to mPath, "direct" to finalUrl, "original" to finalUrl)) {
@@ -1405,15 +1453,34 @@ object FileHostResolver {
             if (!url.startsWith("http")) continue
             DebugLog.log("gdflix", "$action -> ${short(url)}")
             when (verdictOf(url, browser = null, method = "GET", ranged = true)) {
-                Verdict.FILE -> return@withContext stream(url, null)
+                Verdict.FILE -> return@withContext GdfMint(stream(url, null))
                 // A PAGE answer means the mint returned a shortener/interstitial;
                 // one cheap crawl still beats failing the server outright.
                 Verdict.PAGE -> crawl(url, System.currentTimeMillis() + GDFLIX_CRAWL_MS, null)
-                    ?.let { return@withContext it }
+                    ?.let { return@withContext GdfMint(it) }
                 else -> Unit
             }
         }
-        null
+        GdfMint()
+    }
+
+    /** Result of a GDFlix mint attempt; [removed] means the file is gone site-side. */
+    private class GdfMint(val stream: Playable.Stream? = null, val removed: Boolean = false)
+
+    /**
+     * The host's own "this upload no longer exists" page.
+     *
+     * Verified live (2026-11): gdflix.vip/dev answer a removed file with HTTP
+     * 200 and the generic layout whose body says "404! Page Not Found / The
+     * file you are trying to download is no longer available". Nothing behind
+     * it can be clicked or unlocked, so the caller must not fall through to a
+     * browser session for it.
+     */
+    private fun isRemovedUpload(html: String): Boolean {
+        val h = html.lowercase()
+        return "no longer available" in h ||
+            "file has been deleted" in h ||
+            "invalid request" in h && h.contains("no longer")
     }
 
     /**
@@ -1645,6 +1712,9 @@ object FileHostResolver {
     /** A host declared down is skipped for this long before it is probed again. */
     private const val FILEPRESS_DOWN_TTL_MS = 5 * 60_000L
 
+    /** How long a T4A token whose file 404s is remembered as deleted. */
+    private const val TW_DEAD_TTL_MS = 10 * 60_000L
+
     /** An origin is reused for this long; the alias rotates rarely. */
     private const val FILEPRESS_ORIGIN_TTL_MS = 30 * 60_000L
 
@@ -1675,6 +1745,36 @@ object FileHostResolver {
         val h = hoster.lowercase()
         val filepressFamily = h.contains("filepress") || h.contains("filebee") || h.contains("fpgo")
         return filepressFamily && filepressDown()
+    }
+
+    /**
+     * T4A /redirect/ tokens whose real host answered 404/410 — i.e. the site's
+     * upload was deleted. The player asks this before offering the phone/QR
+     * unlock: a deleted file has nothing to unlock, so the ad wall there is
+     * pure friction. Keyed by the token URL, which is unique per episode and
+     * hoster, and expires so a re-upload is probed again.
+     */
+    private val twDeadUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun isDeadTwToken(tokenUrl: String): Boolean {
+        val until = twDeadUntil[tokenUrl] ?: return false
+        if (System.currentTimeMillis() < until) return true
+        twDeadUntil.remove(tokenUrl)
+        return false
+    }
+
+    private fun markTwDeadFile(tokenUrl: String) {
+        twDeadUntil[tokenUrl] = System.currentTimeMillis() + TW_DEAD_TTL_MS
+        DebugLog.log("resolve", "T4A token points at a deleted file — unlock wall not offered")
+    }
+
+    /** True when the host itself answers 404/410 for this URL. */
+    private fun answersGone(url: String): Boolean = try {
+        probeClient.newCall(
+            Request.Builder().url(url).header("User-Agent", Api.USER_AGENT).build(),
+        ).execute().use { it.code == 404 || it.code == 410 }
+    } catch (e: Exception) {
+        false
     }
 
     private fun markFilepressDown(reason: String) {

@@ -192,7 +192,16 @@ object HubCloudResolver {
                 val req = Request.Builder()
                     .url(current)
                     .header("User-Agent", Api.USER_AGENT)
-                    .header("Referer", if (hop == 0) "https://hubcloud.cx/" else current)
+                    // hubcloud.cx no longer resolves; hubcloud.mov is the live
+                    // domain (2026-11). Derive it from the hop itself so the
+                    // next rotation does not need a code change.
+                    .header(
+                        "Referer",
+                        if (hop == 0) {
+                            (Regex("""^(https?://[^/]+)""").find(pixelUrl)?.groupValues?.get(1)
+                                ?: "https://hubcloud.mov") + "/"
+                        } else current,
+                    )
                     .head()
                     .build()
                 val next = probeClient.newCall(req).execute().use { resp ->

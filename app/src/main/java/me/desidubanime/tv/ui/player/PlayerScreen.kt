@@ -74,7 +74,11 @@ fun PlayerScreen(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     var showLogs by remember { mutableStateOf(false) }
-    val logs by DebugLog.lines.collectAsStateWithLifecycle()
+    // The diagnostic log is NOT collected here any more. Collecting it at the
+    // top of this composable made every resolve log line (dozens per pick)
+    // recompose the whole player screen while ExoPlayer was starting — visible
+    // as a stutter exactly when the stream appears. It is now collected inside
+    // the log panel, so log traffic repaints only that panel.
     val coroutineScope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         showLogs = ServiceLocator.settings.getShowPlayerLogs()
@@ -540,23 +544,35 @@ fun PlayerScreen(
             }
         }
         if (showLogs) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(16.dp)
-                    .background(Color(0xCC000000))
-                    .padding(8.dp)
-            ) {
-                Column {
-                    logs.takeLast(20).forEach { line ->
-                        Text(
-                            line,
-                            color = Color.White,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(vertical = 1.dp)
-                        )
-                    }
-                }
+            PlayerLogPanel(Modifier.align(Alignment.BottomStart))
+        }
+    }
+}
+
+/**
+ * The last few resolve log lines, over the picture.
+ *
+ * Collects [DebugLog] ITSELF so log traffic cannot recompose the player. The
+ * tail is read with `takeLast(20)` on an immutable list — cheap enough to run
+ * on every emission even on a low-end box.
+ */
+@Composable
+private fun PlayerLogPanel(modifier: Modifier = Modifier) {
+    val logs by DebugLog.lines.collectAsStateWithLifecycle()
+    Box(
+        modifier = modifier
+            .padding(16.dp)
+            .background(Color(0xCC000000))
+            .padding(8.dp),
+    ) {
+        Column {
+            logs.takeLast(20).forEach { line ->
+                Text(
+                    line,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
             }
         }
     }

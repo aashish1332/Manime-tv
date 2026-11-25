@@ -238,6 +238,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
                     fo["host"]?.jsonPrimitive?.content.orEmpty(),
                     fo["short"]?.jsonPrimitive?.content.orEmpty(),
                 ) ?: continue
+                if (isUnresolvable(hoster)) continue
                 links.add(HubLink(quality = quality, driveUrl = abs, hoster = hoster, source = LinkSource.TW))
             }
         }
@@ -369,6 +370,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
         if (href.contains("/redirect/", ignoreCase = true)) {
             val (label, domain) = hosterLabel(anchor)
             val hoster = canonicalHoster(label, domain) ?: return null
+            if (isUnresolvable(hoster)) return null
             return HubLink(
                 quality = quality.ifBlank { "Default" },
                 driveUrl = href,
@@ -377,6 +379,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
             )
         }
         val hoster = Hosters.detect(href) ?: return null
+        if (isUnresolvable(hoster)) return null
         // Prefer a quality found in the anchor itself over the running heading.
         val qRx = Regex("""\d{3,4}[Pp]""")
         val ownQuality = listOf(anchor.text(), anchor.attr("title"))
@@ -408,6 +411,24 @@ class ToonWorldScraper(private val settings: AppSettings) {
             return name to domain
         }
         return "" to ""
+    }
+
+    /**
+     * Hoster families T4A lists but the app can never play, dropped at scrape
+     * time so they cannot become dead rows in the server menu (and cannot drag
+     * the viewer into the ad/QR wall when the only pickable row is one of them).
+     *
+     * MEGA: a T4A MEGA card carries `{"domain":"https://mega.nz/file/",
+     * "hidden":"<56 chars>"}` — no file key, and MEGA's API answers that pageless
+     * id with ENOENT, so there is no bytes path at all (verified live against
+     * four cards of one episode).
+     *
+     * FilePress: its numbered origins (newN.filepress.lat) no longer accept
+     * connections at all, and every resolution attempt ends in a probe timeout.
+     */
+    private fun isUnresolvable(hoster: String): Boolean {
+        val h = hoster.lowercase()
+        return h == "mega" || h.contains("filepress") || h.contains("filebee") || h.contains("fpgo")
     }
 
     /** Map a card label/domain to our canonical hoster names. */

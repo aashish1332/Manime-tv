@@ -17,3 +17,5 @@ rebuild.sh
 *.log
 hs_err_pid*.log
 replay_pid*.log
+/tools/exa-search/node_modules/
+/tools/exa-search/.env
