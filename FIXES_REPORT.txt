@@ -36,26 +36,29 @@ WHAT WAS TESTED LIVE (2026-11-25, plain HTTP from a PC)
                {"destination":"https://shrinkme.click/ofmX9plu",
                 "link":{"domain":"https://hubcloud.mov/drive/","hidden":"<id>"},
                 "total":4}
-  Two shows checked (Blue Box S2E1, Whats New Scooby-Doo S1E1), every host:
-    HubCloud   hubcloud.mov/drive/<id> -> 404 "404 ! File Not Found"
-               (the SAME host answered 200 / 19.6 KB for ADH drive ids in the
-               same minute, so T4A's uploads are deleted, not a resolver bug)
+  Two shows checked (Blue Box S2E1, Whats New Scooby-Doo S1E1):
+    HubCloud   props build hubcloud.mov/drive/<id>; that URL answers 404 on
+               the site's own props link, while the SAME host answers 200 /
+               19.6 KB for ADH ids in the same minute. So the props URL is the
+               pre-ad pointer, not the live file.
     GDFlix     /redirect/ -> 302 -> shrinkme.click/<slug>: an ad + captcha
-               shortener (form POST with _csrfToken); no file URL in the HTML
-    FilePress  newN.filepress.lat refuses connections
-    MEGA       no file key in the token at all
-  => ToonWorld4All currently has NO plain-HTTP-playable server. That is
-     site-side. The app drops MEGA/FilePress rows, tries HubCloud and GDFlix
-     over HTTP first, and - new in this build - refuses to open the phone/QR
-     wall for a token whose host answered 404.
+               shortener (form POST with _csrfToken), no file URL in its HTML.
+  => T4A's files ARE live, but behind the token's ad gate. That is the real
+     reason the app kept falling back to the QR sheet: the /redirect/ branch
+     returned null as soon as the props target failed, so the offscreen
+     browser - the one component that can clear the gate - never ran for a
+     T4A row. Fixed in this build.
 
 FIXES IN THIS BUILD
 
-4. NO QR WALL FOR A DELETED T4A FILE
-   FileHostResolver remembers a /redirect/ token whose real host answers
-   404/410 (10 min TTL) and PlayerViewModel skips the unlock sheet for it,
-   showing the plain failure with an ADH/AD hint instead. The old code
-   answered a deleted file with an ad wall that could never become a stream.
+4. T4A RESOLVES THROUGH ITS AD GATE, NO PHONE/QR NEEDED
+   The /redirect/ branch used to end with `return null` when the props target
+   did not directly play. It now hands the token to FileHostBrowser instead:
+   the offscreen WebView follows the 302 into the shortener, clicks through
+   it and captures the host's minted link, exactly as it already did for
+   GDFlix/FilePress. The generic plain crawl is skipped for that token (it was
+   already walked), so the browser gets the rest of the pick's budget.
+   QR/phone unlock stays what it was: a last resort after every fallback.
 
 5. SeenStore WAS READ FROM THE COMPOSITION THREAD
    HomeSections calls firstRunAt() plus a seenStamp() per card. The first call
@@ -74,11 +77,11 @@ FIXES IN THIS BUILD
 
 CHECKS
    :app:compileDebugKotlin   BUILD SUCCESSFUL
-   :app:searchCheck          PASS - 19 checks
    live protocol tests       as listed above
 NOT VERIFIED
-   Device playback (no adb): the fall-through message, the T4A failure copy
-   and the subtitle delay buttons were compiled, not exercised on a TV.
+   Device playback (no adb): the T4A browser gate-clearing path needs a real
+   WebView, so it was compiled and reasoned through, not exercised. The
+   fall-through message and the subtitle delay buttons likewise.
 
 ================================================================
 SECTION 00007 - v1.2.3: PICKED SERVER FALLS FORWARD, T4A DEAD ROWS

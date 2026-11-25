@@ -224,6 +224,9 @@ object FileHostResolver {
         // That re-dispatch is what removes the QR requirement: before it, the
         // token was only probed once and, when the guess wasn't directly
         // playable, control fell into the browser flow — the ad/QR wall.
+        // Set when a T4A token has already been walked as far as plain HTTP can
+        // take it, so the generic crawl below does not repeat that work.
+        var twTokenExhausted = false
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
             val target = redirectTargetOf(pageUrl)
             if (target != null && target.contains("mega.nz/", ignoreCase = true)) {
@@ -248,16 +251,21 @@ object FileHostResolver {
                 // Plain HTTP only: the browser hop here IS the QR flow, and it
                 // must never be reached implicitly.
                 crawl(target, deadline, browser = null)?.let { return@withContext it }
-                // DEFINITIVE 404 = the upload is GONE, not ad-gated. Verified
-                // live 2026-11: T4A's HubCloud tokens build
-                // hubcloud.mov/drive/<id> and that URL answers "404 ! File Not
-                // Found" for every card of every episode checked, while the
-                // same host resolves ADH's ids fine. Nothing behind a deleted
-                // file can be unlocked, so the player must not answer it with
-                // the phone/QR ad wall — remember the verdict for that token.
-                if (answersGone(target)) markTwDeadFile(pageUrl)
-                DebugLog.log("resolve", "redirect target unresolved -> ${short(target)}")
-                return@withContext null
+                // THE PROPS TARGET IS NOT THE LAST WORD. T4A mints the props
+                // link for the page a desktop browser would land on; its live
+                // file sits behind the token's ad gate, so that props URL can
+                // answer 404 while the episode plays fine once the gate is
+                // cleared. Returning null here (which is what this branch used
+                // to do) made every T4A HubCloud row a dead end that could
+                // only ever reach the QR sheet. With a browser available, fall
+                // through to the browser stage below and let it clear the gate
+                // the way the site intends.
+                if (browser == null) {
+                    DebugLog.log("resolve", "redirect target unresolved, no browser -> ${short(target)}")
+                    return@withContext null
+                }
+                twTokenExhausted = true
+                DebugLog.log("resolve", "redirect target unresolved — handing the token to the browser")
             }
             DebugLog.log("resolve", "redirect __PROPS__ empty, falling through to generic crawl")
         }
@@ -417,7 +425,9 @@ object FileHostResolver {
             skipPlainCrawl = true
         }
         // 1. Plain HTTP. Cheap, and enough for any host that isn't gated.
-        if (!skipPlainCrawl) {
+        if (twTokenExhausted) {
+            DebugLog.log("resolve", "skip plain crawl: T4A token already walked to its ad gate")
+        } else if (!skipPlainCrawl) {
             crawl(pageUrl, deadline, browser = null)?.let {
                 DebugLog.log("resolve", "plain-HTTP OK -> ${short(it.url)}")
                 return@withContext it
@@ -1712,9 +1722,6 @@ object FileHostResolver {
     /** A host declared down is skipped for this long before it is probed again. */
     private const val FILEPRESS_DOWN_TTL_MS = 5 * 60_000L
 
-    /** How long a T4A token whose file 404s is remembered as deleted. */
-    private const val TW_DEAD_TTL_MS = 10 * 60_000L
-
     /** An origin is reused for this long; the alias rotates rarely. */
     private const val FILEPRESS_ORIGIN_TTL_MS = 30 * 60_000L
 
@@ -1747,35 +1754,7 @@ object FileHostResolver {
         return filepressFamily && filepressDown()
     }
 
-    /**
-     * T4A /redirect/ tokens whose real host answered 404/410 — i.e. the site's
-     * upload was deleted. The player asks this before offering the phone/QR
-     * unlock: a deleted file has nothing to unlock, so the ad wall there is
-     * pure friction. Keyed by the token URL, which is unique per episode and
-     * hoster, and expires so a re-upload is probed again.
-     */
-    private val twDeadUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    fun isDeadTwToken(tokenUrl: String): Boolean {
-        val until = twDeadUntil[tokenUrl] ?: return false
-        if (System.currentTimeMillis() < until) return true
-        twDeadUntil.remove(tokenUrl)
-        return false
-    }
-
-    private fun markTwDeadFile(tokenUrl: String) {
-        twDeadUntil[tokenUrl] = System.currentTimeMillis() + TW_DEAD_TTL_MS
-        DebugLog.log("resolve", "T4A token points at a deleted file — unlock wall not offered")
-    }
-
-    /** True when the host itself answers 404/410 for this URL. */
-    private fun answersGone(url: String): Boolean = try {
-        probeClient.newCall(
-            Request.Builder().url(url).header("User-Agent", Api.USER_AGENT).build(),
-        ).execute().use { it.code == 404 || it.code == 410 }
-    } catch (e: Exception) {
-        false
-    }
 
     private fun markFilepressDown(reason: String) {
         filepressDownUntil = System.currentTimeMillis() + FILEPRESS_DOWN_TTL_MS

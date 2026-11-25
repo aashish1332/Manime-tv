@@ -288,13 +288,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     // T4A /redirect/ row. A dead file never opens it.
                     if (option.isHub &&
                         isTwSource(option.sourceLabel) &&
-                        option.embedUrl.contains("/redirect/", ignoreCase = true) &&
-                        // A DELETED FILE HAS NOTHING TO UNLOCK. When the token's
-                        // real host answered 404 (verified live: T4A's HubCloud
-                        // copies are gone site-side), the phone/QR sheet could
-                        // only sell an ad that never becomes a stream, so the
-                        // viewer gets the plain failure instead.
-                        !me.desidubanime.tv.scrape.FileHostResolver.isDeadTwToken(option.embedUrl)
+                        option.embedUrl.contains("/redirect/", ignoreCase = true)
                     ) {
                         pendingTw = option
                         _state.value = _state.value.copy(
@@ -428,8 +422,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // HTTP, so no unlock step is required. Only a genuinely dead row
             // offers the QR sheet, and the menu should never send the viewer to
             // watch ads before trying another server.
-            "$base\nT4A rows resolve directly when the site's file is alive; if all of " +
-                "them failed, the upload is gone from the site — use an ADH or AD server."
+            "$base\nToonWorld4All: try a HubCloud or GDFlix row from the server list."
         } else base
 
     /**
