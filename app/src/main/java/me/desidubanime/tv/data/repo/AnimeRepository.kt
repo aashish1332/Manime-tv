@@ -2301,36 +2301,6 @@ class AnimeRepository(
             }
     }
 
-    /**
-     * A fresh /redirect/ token URL from T4A's newest episode — the target the
-     * QR encodes. Tokens are per-request and short-lived; the QR screen
-     * re-fetches a candidate when it starts checking.
-     */
-    suspend fun twUnlockCandidateUrl(): String? = twUnlockCandidate()?.url
-
-    /** Token + identity of the episode it belongs to (for direct-play after unlock). */
-    data class TwUnlockCandidate(
-        val url: String,
-        val animeId: Int,
-        val title: String,
-        val posterUrl: String,
-    )
-
-    suspend fun twUnlockCandidate(): TwUnlockCandidate? = withContext(Dispatchers.IO) {
-        runCatching {
-            val posts = twCatalog?.value
-                ?: runCatching { tw.latestPosts(perPage = 5, client = Network.bulk) }.getOrDefault(emptyList())
-            val newest = posts.maxByOrNull { it.modified } ?: return@runCatching null
-            val url = tw.firstRedirectToken(newest.episodesUrl) ?: return@runCatching null
-            TwUnlockCandidate(
-                url = url,
-                animeId = -(newest.postId + TW_ID_OFFSET),
-                title = newest.displayTitle,
-                posterUrl = newest.posterUrl,
-            )
-        }.getOrNull()
-    }
-
     // ---- mappers ----
 
     /**

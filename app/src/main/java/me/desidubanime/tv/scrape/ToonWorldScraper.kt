@@ -340,27 +340,6 @@ class ToonWorldScraper(private val settings: AppSettings) {
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1) ?: ""
 
     /**
-     * Fresh unlock candidate for the TW4A QR flow: fetch [episodePageUrl]
-     * and pull the FIRST opaque /redirect/<hex> token out of its embedded
-     * __PROPS__ JSON (raw-HTML scan fallback). Absolute URL returned; the
-     * token is minted per-request, so callers must use it immediately.
-     */
-    fun firstRedirectToken(episodePageUrl: String, client: OkHttpClient = Network.client): String? {
-        val html = try {
-            get(client, episodePageUrl)
-        } catch (e: Exception) {
-            return null
-        }
-        val haystack = Regex("""window\.__PROPS__\s*=\s*(\{.*?\});\s*</script>""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.groupValues?.get(1) ?: html
-        val hex = Regex(""""link"\s*:\s*"/redirect/([a-f0-9]{32,})"""").find(haystack)?.groupValues?.get(1)
-            ?: Regex("""/redirect/([a-f0-9]{32,})""").find(haystack)?.groupValues?.get(1)
-            ?: return null
-        val origin = originOf(episodePageUrl).takeIf { it.isNotBlank() } ?: return null
-        return "$origin/redirect/$hex"
-    }
-
-    /**
      * Build a [HubLink] from an anchor on a T4A page, or null to skip it.
      * Handles BOTH the opaque "/redirect/<hex>" tokens (hoster label taken
      * from the card's own heading/domain) and plain direct drive URLs.
