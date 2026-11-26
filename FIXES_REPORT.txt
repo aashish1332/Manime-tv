@@ -1316,3 +1316,39 @@ CHECKS
 - :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,653,486 bytes)
 NOT VERIFIED (no adb/device): on-TV smoothness of the launch refresh, the
 unlock screen layout/focus, a real phone solve.
+
+================================================================
+SECTION H — v1.2.6: GDFlix rows fail fast on a dead mint
+================================================================
+MEASURED FIRST (live, 2026-11-26, ADH's own episode host)
+- Source: https://new.adhlinks.com/episode/bluebox-s2/ carries 28 gdflix ids.
+- Protocol replayed exactly: gdflix.vip/file/<id> -> 302 new10.gdflix.io
+  (43.9KB page, formData.append("key","<hex>")) -> POST /mfile/<id> with
+  action=instant + key + x-token -> {"error":false,"url":"video-downloads..."}
+  -> 200 video/mkv with the real byte count.
+- 11 distinct uploads sampled: 9 play (Matroska magic verified), 2 answer
+  HTTP 400 text/html, Content-Length: 0, Server: UploadServer.
+- That 400 is indistinguishable from a garbage token's reply and it follows
+  the URL, not the client: Android-TV / desktop / ExoPlayer / no-UA, with and
+  without cookies, Range or not — a healthy URL answers 200 for all of them and
+  a dead one answers 400 for all of them.
+- No gdflix route rescues a dead upload: /cloud/<ts>/<id> and /cflare/<ts>/<id>
+  return the same shell, the busycdn anchor answers 500 {"error":...}, /api/*
+  returns the SPA, and re-minting three times yields the same token.
+
+THE FIX
+- gdflixInstant probes the minted URL's status before scoring it
+  (statusOf: one 1-byte ranged GET, body never read). A 4xx now returns
+  GdfMint(removed = true), so the row dies immediately instead of spending the
+  generic crawl and a WebView pass on a file no route can serve.
+- The pick path no longer swallows the reason: selectOption logs
+  "<label>: threw <Class> after <N>ms — <message>" and
+  "<label>: ok|no stream in <N>ms". A sub-second failure was invisible before
+  because every early death looked like a slow server that timed out.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS
+- :app:assembleDebug BUILD SUCCESSFUL
+NOT VERIFIED: no adb/device, so the on-TV timing of the fail-fast and the new
+pick log lines are compiled, not watched.

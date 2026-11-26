@@ -1104,6 +1104,25 @@ object FileHostResolver {
         return Verdict.DEAD
     }
 
+    /**
+     * HTTP status of a 1-byte ranged GET on [url]; the body is never read.
+     *
+     * [verdictOf] deliberately answers `null` for any non-2xx response, because
+     * an early strategy deserves a second look — but a HOSTER'S OWN MINT
+     * returning a URL that the CDN rejects is conclusive, and the caller has to
+     * be able to tell that apart from "inconclusive".
+     */
+    private fun statusOf(url: String): Int? = try {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", Api.USER_AGENT)
+            .header("Range", "bytes=0-1")
+            .build()
+        probeClient.newCall(req).execute().use { it.code }
+    } catch (e: Exception) {
+        null
+    }
+
     /** One probe attempt. Null = inconclusive (try the next strategy). */
     private fun verdictOf(url: String, browser: Browser?, method: String, ranged: Boolean): Verdict? = try {
         val req = Request.Builder()
@@ -1458,6 +1477,25 @@ object FileHostResolver {
             val url = raw.replace("\\/", "/")
             if (!url.startsWith("http")) continue
             DebugLog.log("gdflix", "$action -> ${short(url)}")
+            // A 4xx FROM GOOGLE ENDS THE ROW; IT IS NOT A REASON TO CRAWL.
+            // Measured live (2026-11-26): the mint answers
+            // {"error":false,"info":"Success","url":"https://video-downloads…"}
+            // and that URL then answers 400 text/html, Content-Length: 0,
+            // Server: UploadServer for a dead or quota-exhausted Drive copy —
+            // byte-identical to what a garbage token gets. Nothing on gdflix's
+            // side recovers it: /cloud/<ts>/<id> and /cflare/<ts>/<id> return
+            // the same shell, the busycdn anchor answers 500, /api/* is the
+            // SPA, and re-minting yields the same dead token. The crawl and
+            // browser stages below therefore cannot succeed — they only add a
+            // WebView session before the row dies.
+            val mintedStatus = statusOf(url)
+            if (mintedStatus != null && mintedStatus in 400..499) {
+                DebugLog.log(
+                    "gdflix",
+                    "$action minted URL rejected ($mintedStatus) — upload dead, failing row now",
+                )
+                return@withContext GdfMint(removed = true)
+            }
             when (verdictOf(url, browser = null, method = "GET", ranged = true)) {
                 Verdict.FILE -> return@withContext GdfMint(stream(url, null))
                 // A PAGE answer means the mint returned a shortener/interstitial;

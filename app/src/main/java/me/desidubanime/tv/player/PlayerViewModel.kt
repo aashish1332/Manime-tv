@@ -246,6 +246,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             var current = option
             while (true) {
                 tried += current
+                val attemptStart = System.currentTimeMillis()
                 val resolved = try {
                     // The pick the viewer made gets the full budget; a fallback
                     // server has to be quicker than that or the pick feels
@@ -258,8 +259,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
+                    // A SWALLOWED THROWABLE IS WHY A SUB-SECOND PICK FAILURE WAS
+                    // INVISIBLE: a pick that dies before the first request (bad
+                    // URL, rejected URL, missing browser) looked exactly like a
+                    // server that timed out slowly. Name the reason and the
+                    // time it actually took.
+                    me.desidubanime.tv.data.DebugLog.log(
+                        "pick",
+                        "${current.label}: threw ${t.javaClass.simpleName} after " +
+                            "${System.currentTimeMillis() - attemptStart}ms — ${t.message}",
+                    )
                     null
                 } ?: if (current.isHub) null else Playable.Embed(current.embedUrl)
+                me.desidubanime.tv.data.DebugLog.log(
+                    "pick",
+                    "${current.label}: " + (if (resolved != null) "ok" else "no stream") +
+                        " in ${System.currentTimeMillis() - attemptStart}ms",
+                )
                 if (resolved != null) {
                     PlaybackSession.preferredServerLabel = current.stickyKey
                     _state.value = _state.value.copy(
