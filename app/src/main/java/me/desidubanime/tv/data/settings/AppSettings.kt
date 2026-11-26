@@ -144,7 +144,7 @@ class AppSettings(private val context: Context) {
 
     companion object {
         const val DEFAULT_ADH_BASE = "https://www.animedubhindi.link"
-        const val DEFAULT_AD_BASE = "https://animedrive.me"
+        const val DEFAULT_AD_BASE = "https://animedrive.in"
         const val DEFAULT_TW_BASE = "https://toonworld4all.me"
     }
 }

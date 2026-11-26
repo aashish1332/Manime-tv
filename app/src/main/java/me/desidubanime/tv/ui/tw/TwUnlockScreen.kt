@@ -92,7 +92,8 @@ fun TwUnlockScreen(
     var phase by remember { mutableStateOf(Phase.Waiting) }
     var status by remember { mutableStateOf("Waiting for your phone…") }
     var attempts by remember { mutableIntStateOf(0) }
-    var showRelay by remember { mutableStateOf(false) }
+    // ON from the start: the phone-sent link is the ONLY pickup that works.
+    var showRelay by remember { mutableStateOf(true) }
     var manualCheck by remember { mutableIntStateOf(0) }
     var unlockedOnce by remember { mutableStateOf(false) }
 
@@ -122,14 +123,6 @@ fun TwUnlockScreen(
         return false
     }
 
-    /** One automatic check: has the token started pointing at a real hoster page? */
-    suspend fun tryToken(): Boolean {
-        val target = runCatching { FileHostResolver.twTokenTarget(tokenUrl) }.getOrNull()
-            ?: return false
-        DebugLog.log("tw-unlock", "token now points at ${target.take(60)}")
-        return deliver(target)
-    }
-
     /** One relay check: did the phone publish a file page URL? */
     suspend fun tryRelay(): Boolean {
         val message = runCatching { TwRelay.poll(topic) }.getOrNull() ?: return false
@@ -138,42 +131,35 @@ fun TwUnlockScreen(
         return deliver(url)
     }
 
-    // Main poll loop. Cancelled with the screen, and every network call is on
-    // IO with its own short timeout, so leaving the player can never leave a
-    // request running behind it.
-    LaunchedEffect(tokenUrl) {
-        repeat(30) { round ->
+    // THE RELAY IS THE ONLY PICKUP — there is no automatic check left to run.
+    // Measured (2026-11-26): the token view hands a fresh visitor a decoy id,
+    // and it keeps doing so for a client that did not itself pass the captcha,
+    // so re-reading the token from the TV can never turn into a file page. The
+    // phone solves the ads and sends the page it landed on; this waits for it.
+    // Cancelled with the screen, and every network call is on IO with its own
+    // short timeout, so leaving the player can never leave a request behind.
+    LaunchedEffect(topic) {
+        repeat(40) { round ->
             if (!isActive || unlockedOnce) return@LaunchedEffect
             attempts = round + 1
             phase = Phase.Checking
-            status = if (showRelay && round % 2 == 1) {
-                "Checking for the link you sent…"
-            } else {
-                "Waiting for your phone to finish the ads…"
-            }
-            if (tryToken()) return@LaunchedEffect
-            if (relayOn && round % 2 == 1 && tryRelay()) return@LaunchedEffect
-            // The relay is the reliable path once the automatic one has had a
-            // fair chance; surface it instead of leaving the viewer guessing.
-            if (!showRelay && round >= 8) showRelay = true
-            // Quick while the viewer is likely still tapping ads, then back off:
-            // T4A rate-limits repeated token reads, and a solve can take minutes.
-            delay(if (round < 12) 4_000 else 10_000)
+            status = "Waiting for the link from your phone…"
+            if (tryRelay()) return@LaunchedEffect
+            delay(5_000)
         }
         if (!unlockedOnce) {
             phase = Phase.TimedOut
-            status = "Still locked. You can retry, or send the link from your phone."
-            showRelay = true
+            status = "No link arrived yet. Send the page your phone reached, then check again."
         }
     }
 
-    // "Check now" — one immediate pass, without resetting the loop above.
+    // "Check now" — one immediate relay read, without resetting the loop above.
     LaunchedEffect(manualCheck) {
         if (manualCheck == 0 || unlockedOnce) return@LaunchedEffect
         phase = Phase.Checking
-        status = "Checking now…"
-        if (!tryToken() && !tryRelay()) {
-            status = "Still locked — finish the ads on your phone, then check again."
+        status = "Checking for the link you sent…"
+        if (!tryRelay()) {
+            status = "Nothing sent yet — open the second QR on your phone and send the page."
             phase = Phase.Waiting
         }
     }
@@ -206,8 +192,9 @@ fun TwUnlockScreen(
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                "T4A keeps its files behind an ad captcha that only a person can pass. " +
-                    "Solve it once on your phone — this screen picks the file up on its own.",
+                "T4A keeps its files behind an ad captcha that only a person can pass, and it " +
+                    "only hands the real file to the session that solved it. Solve the ads on your " +
+                    "phone, then send this screen the page you landed on.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFFC6CDDB),
             )
@@ -263,8 +250,8 @@ fun TwUnlockScreen(
                         )
                         Text(status, style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "3 · The TV starts playing as soon as the unlock is seen." +
-                                if (attempts > 0) "  (check $attempts)" else "",
+                            "3 · Send the file page from your phone — the TV starts playing as " +
+                                "soon as it arrives." + if (attempts > 0) "  (check $attempts)" else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF8A94A6),
                         )

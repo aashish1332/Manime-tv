@@ -145,12 +145,30 @@ class AnimeDriveScraper(private val settings: AppSettings) {
      * so [AdhEpisodePage.ddaSlug] is always null here â€” matching relies on
      * title-key comparison against the DDA catalog (same as ADH pass 1).
      */
-    fun episodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
-        val doc = try {
-            Jsoup.parse(get(client, url), url)
-        } catch (e: Exception) {
-            return AdhEpisodePage(emptyList())
+    suspend fun episodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
+        // PLAIN HTTP FIRST, THEN THE BROWSER. link.animedrive.in now answers a
+        // Cloudflare managed challenge (403 cf-mitigated: challenge) to any
+        // non-browser client — measured 2026-11-26 across OkHttp, curl and
+        // requests, on every UA tried. Only a real engine gets the page, and
+        // what it serves keeps the layout parsed below.
+        var body = runCatching { get(client, url) }.getOrNull()
+        if (body == null || AdPageBrowser.looksLikeChallenge(body)) {
+            val viaBrowser = runCatching { AdPageBrowser.html(url) }.getOrNull()
+            if (viaBrowser != null && !AdPageBrowser.looksLikeChallenge(viaBrowser)) {
+                me.desidubanime.tv.data.DebugLog.log(
+                    "AD-scrape",
+                    "episode page needed the browser (${viaBrowser.length}b) ${url.substringAfterLast("/")}",
+                )
+                body = viaBrowser
+            } else if (body != null) {
+                me.desidubanime.tv.data.DebugLog.log(
+                    "AD-scrape",
+                    "episode page is Cloudflare-gated and no browser cleared it ${url.substringAfterLast("/")}",
+                )
+            }
         }
+        val html = body ?: return AdhEpisodePage(emptyList())
+        val doc = Jsoup.parse(html, url)
 
         // STRICT episode matcher â€” see AdhScraper: a loose bare-"E" pattern
         // matched inside "[Size: 69mb]" and minted zombie episode numbers.

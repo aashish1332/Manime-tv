@@ -2235,7 +2235,7 @@ class AnimeRepository(
 
     /** link.animedrive.in page cache — same pattern as [adhEpisodePage]. */
 
-    private fun adEpisodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
+    private suspend fun adEpisodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
         adPageCache[url].fresh(EPISODES_TTL_MS)?.let { return it }
         val page = ad.episodePage(url, client)
         if (page.episodes.isNotEmpty()) {

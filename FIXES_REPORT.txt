@@ -1352,3 +1352,65 @@ CHECKS
 - :app:assembleDebug BUILD SUCCESSFUL
 NOT VERIFIED: no adb/device, so the on-TV timing of the fail-fast and the new
 pick log lines are compiled, not watched.
+
+================================================================
+SECTION I — v1.2.6: T4A's automatic check is gone
+================================================================
+WHY (measured live, 2026-11-26)
+- A T4A token view from a cookie-less client returns the interstitial whose
+  `link.hidden` is random filler of the real id's length; it 404s on the
+  hoster. The site keeps serving that decoy to any client that did not itself
+  pass its captcha, so re-reading the token from the TV can never become a file
+  page — the old props read + decoy probe + crawl could only ever waste the
+  row's budget and then fail.
+
+WHAT CHANGED
+- FileHostResolver.resolve: a /redirect/ URL returns null immediately, with no
+  request at all ("phone unlock only, no automatic check"). twGated() is no
+  longer set by a checker that cannot work.
+- Every T4A row is marked " · unlock" unconditionally (the marker used to
+  depend on the checker's verdict).
+- The unlock is offered whenever the episode HAS a T4A row (twAttempted), in
+  both the manual-pick and auto-resolve paths, instead of waiting for a gate
+  verdict that no longer exists.
+- TwUnlockScreen: the token poll is deleted. The phone-sent link is the only
+  pickup — QR 1 opens the token so the phone can solve the ads, QR 2 (relay,
+  now shown by default) sends back the page it landed on, and the screen
+  resolves that and starts playback.
+
+================================================================
+SECTION J — v1.2.6: AnimeDrive access
+================================================================
+MEASURED (live, 2026-11-26)
+- animedrive.me (the app's old AD default): a 5 KB landing page that redirects
+  to animedrive.in. link.animedrive.me and animedrive.cc are the same landing
+  page, for every path. DEFAULT_AD_BASE is now https://animedrive.in.
+- link.animedrive.in is the ONLY place AD publishes episode files, and it is
+  behind a Cloudflare managed challenge: 403 + cf-mitigated: challenge for
+  OkHttp, curl and requests, on every UA tried (Android TV, desktop Chrome,
+  Googlebot, bingbot, none), on /feed/ and on /wp-json/ too. Only /robots.txt
+  answers 200. animedrive.in's own WP REST is open but its posts carry no file
+  links, the main domain has no /dl/ route, and /episode/ and /links/ are 404.
+- A real Chromium passes the challenge, and the page it serves keeps the layout
+  the parser already handles: 1 .adc-epname, 5 .adc-hoster-lbl, 11 .adc-btn,
+  every link a link.animedrive.in/dl/<base64> token. Decoded, they point at
+  https://new6.gdflix.io/file/<id> (and send.cm for one quality).
+- Those AD-side GDFlix ids work: new6.gdflix.io/file/xeobUtfyqCO3Sxu ->
+  200 video/mkv 653,084,214 bytes; yEJBzGzCgKMY5y0 -> 200 video/mkv
+  144,666,434 bytes.
+
+WHAT CHANGED
+- New scrape/AdPageBrowser: a tiny bridge the player fills with its WebView
+  (25 s cap). AnimeDriveScraper.episodePage is suspend now: plain HTTP first,
+  and when the body is missing or is a Cloudflare interstitial it asks the
+  browser for the page and parses whichever body it got. Both failures are
+  logged with the reason.
+- AnimeRepository.adEpisodePage became suspend (its two call sites are already
+  inside coroutines), and PlayerViewModel installs the fetcher.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS — 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,641,601 bytes)
+NOT VERIFIED: no adb/device — the WebView pass on link.animedrive.in, the
+relay-only unlock and the marker on every T4A row are compiled, not watched.

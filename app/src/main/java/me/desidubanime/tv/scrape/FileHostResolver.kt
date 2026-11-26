@@ -243,68 +243,20 @@ object FileHostResolver {
         // and ENDS after one cheap probe when it hands out a decoy. No browser
         // hop, no ad page and no QR code is ever involved: the player moves to
         // the next server instead.
-        if (pageUrl.contains("/redirect/", ignoreCase = true) && twGated()) {
-            DebugLog.log("resolve", "T4A ad-gate active — row skipped without a request")
-            return@withContext null
-        }
+        // T4A: THERE IS NO AUTOMATIC CHECKER, BECAUSE THERE IS NOTHING TO CHECK.
+        //
+        // Measured live (2026-11-26): a fresh visitor's token view carries a
+        // `link.hidden` value that is RANDOM FILLER of the real id's length and
+        // 404s on the hoster, and the site keeps serving that decoy until its
+        // own ad captcha is solved IN THE SESSION THAT SOLVED IT. A cookie-less
+        // TV read therefore never turns into a real file page — not on the
+        // first try, not after a human solves the ads on a phone — so every
+        // props read, decoy probe and crawl this branch used to run could only
+        // cost time and then fail. The row now ends here without a request and
+        // the player offers the phone unlock instead: scan the token, solve the
+        // ads, send back the page you reached (the second QR / relay).
         if (pageUrl.contains("/redirect/", ignoreCase = true)) {
-            val target = redirectTargetOf(pageUrl)
-            if (target != null && target.contains("mega.nz/", ignoreCase = true)) {
-                // MEGA CANNOT BE RESOLVED THIS WAY, AND PRETENDING OTHERWISE
-                // COSTS THE VIEWER A QR WALL. A T4A MEGA card carries no file
-                // key, so domain+hidden builds a mega.nz page with no key and
-                // no bytes behind it (verified live: the constructed link is
-                // a "File on MEGA" shell and the file API answers ENOENT).
-                DebugLog.log("resolve", "redirect -> MEGA (no key in token, unsupported)")
-                return@withContext null
-            }
-            if (target != null && !target.contains("/redirect/", ignoreCase = true)) {
-                DebugLog.log("resolve", "redirect -> ${short(target)}")
-                // DECOY CHECK — ONE GET, and the only thing that separates a
-                // playable row from an ad-gated one. A real target is a hoster
-                // page (HubCloud ~20-28KB, GDFlix ~29-44KB); a gated row's
-                // decoy id lands on the host's ~20-byte "File Not Found". Only
-                // a TINY body proves the decoy (a null/403 answer stays
-                // inconclusive and still gets the normal resolvers), so this
-                // can never reject a healthy upload.
-                val targetPage = get(target, System.currentTimeMillis() + TW_PROPS_PROBE_MS)
-                if (targetPage != null && targetPage.length < TW_DECOY_PAGE_BYTES) {
-                    twGateUntil = System.currentTimeMillis() + TW_GATE_TTL_MS
-                    DebugLog.log(
-                        "resolve",
-                        "T4A props id is a gate decoy (${targetPage.length}b) — row skipped, no browser",
-                    )
-                    return@withContext null
-                }
-                // SHARED DEADLINE. This used to hand the nested resolve the
-                // FULL budget again, so one T4A token could burn 45s here and
-                // another 45s below before the viewer saw anything.
-                // NO BROWSER, deliberately: T4A's gate is a captcha that only a
-                // human can tick, so a WebView pass could only ever burn budget.
-                resolve(target, hosterFromUrl(target, hoster), msLeft(deadline), browser = null)?.let {
-                    DebugLog.log("resolve", "redirect resolved -> ${short(it.url)}")
-                    return@withContext it
-                }
-                // A generic pass over the REAL page still beats an ad wall.
-                // Plain HTTP only: the browser hop here IS the QR flow, and it
-                // must never be reached implicitly.
-                crawl(target, deadline, browser = null)?.let { return@withContext it }
-                // THE PROPS TARGET IS NOT THE LAST WORD. T4A mints the props
-                // link for the page a desktop browser would land on; its live
-                // file sits behind the token's ad gate, so that props URL can
-                // answer 404 while the episode plays fine once the gate is
-                // cleared. Returning null here (which is what this branch used
-                // to do) made every T4A HubCloud row a dead end that could
-                // only ever reach the QR sheet. With a browser available, fall
-                // through to the browser stage below and let it clear the gate
-                // the way the site intends.
-                DebugLog.log("resolve", "redirect target unresolved -> ${short(target)}")
-                return@withContext null
-            }
-            // No props at all: the token itself is dead or gated. Crawling the
-            // token page (or opening it in a browser) cannot mint a file, so
-            // end here rather than spending the caller's budget.
-            DebugLog.log("resolve", "redirect props missing (gate or dead token) — row skipped")
+            DebugLog.log("resolve", "T4A token row — phone unlock only, no automatic check")
             return@withContext null
         }
         if (hoster.equals("HubCloud", ignoreCase = true)) {

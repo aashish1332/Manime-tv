@@ -65,6 +65,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         override fun cookiesFor(url: String): String? = pages.cookiesFor(url)
     }
 
+    /**
+     * AnimeDrive's episode host serves nothing to plain HTTP (Cloudflare
+     * managed challenge), so the scraper reads that one page through this
+     * browser. The player is the only place that owns a WebView, and it is
+     * also where episodes are opened, so the bridge is installed here.
+     */
+    init {
+        me.desidubanime.tv.scrape.AdPageBrowser.install { url -> browser.html(url, AD_PAGE_MS) }
+    }
+
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
@@ -292,9 +302,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     // NOTHING PLAYED. If a ToonWorld4All row was involved, the
                     // reason is almost always the site's captcha gate — so offer
                     // the phone unlock instead of a bare "no working file".
-                    val twRow = if (current.isHub && (isTwSource(current.sourceLabel) ||
-                            me.desidubanime.tv.scrape.FileHostResolver.twGated())
-                    ) {
+                    val twRow = if (current.isHub && isTwSource(current.sourceLabel)) {
                         TwUnlockRequest(current.embedUrl, current.hoster, current)
                     } else {
                         null
@@ -570,11 +578,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // unreachable on any episode that also had another source, which is
         // exactly when a viewer wants to unlock. The marker is idempotent and
         // stripped from [PlayOption.stickyKey], so it never breaks stickiness.
-        val twGated = me.desidubanime.tv.scrape.FileHostResolver.twGated()
+        // THE MARKER IS UNCONDITIONAL NOW. There is no automatic check to tell
+        // a gated T4A row from a free one: every T4A link is a /redirect/ token
+        // whose target is a decoy until a human clears the site's captcha, so
+        // the row always needs the phone unlock and always says so.
         val visible = options
             .filterNot { it.isHub && me.desidubanime.tv.scrape.FileHostResolver.isDown(it.hoster) }
             .map { option ->
-                if (twGated && option.isHub && isTwSource(option.sourceLabel)) {
+                if (option.isHub && isTwSource(option.sourceLabel)) {
                     option.markedForUnlock()
                 } else {
                     option
@@ -707,9 +718,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // Only when the gate is KNOWN to be up (one cheap probe already paid
             // for by a TW row): otherwise this would pop a QR on every failed
             // resolve, including episodes that simply have no T4A row.
-            val twRow = if (me.desidubanime.tv.scrape.FileHostResolver.twGated() &&
-                _state.value.playable == null
-            ) {
+            val twRow = if (twAttempted && _state.value.playable == null) {
                 ordered.firstOrNull { it.isHub && isTwSource(it.sourceLabel) }
             } else {
                 null
@@ -792,6 +801,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
          * it, and a Cloudflare-gated host needs the challenge to clear, the
          * page to render, and a click round before it gives up the file.
          */
+        /** One Cloudflare-gated episode page through the WebView. */
+        const val AD_PAGE_MS = 25_000L
+
         const val MANUAL_RESOLVE_MS = 45_000L
 
         /**
