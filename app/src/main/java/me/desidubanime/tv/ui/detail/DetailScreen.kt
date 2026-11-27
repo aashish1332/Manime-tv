@@ -4,6 +4,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -48,7 +53,12 @@ import me.desidubanime.tv.data.model.Episode
 import me.desidubanime.tv.ui.common.ErrorScreen
 import me.desidubanime.tv.ui.common.LoadingScreen
 import me.desidubanime.tv.ui.common.UiState
+import me.desidubanime.tv.ui.theme.AccentGradient
+import me.desidubanime.tv.ui.theme.HairLine
+import me.desidubanime.tv.ui.theme.Muted
+import me.desidubanime.tv.ui.theme.OnBg
 import me.desidubanime.tv.ui.theme.Primary
+import me.desidubanime.tv.ui.theme.SurfaceHi
 
 @Composable
 fun DetailScreen(
@@ -137,11 +147,46 @@ private fun DetailContent(
             }
         }
         item(key = "episodes-title", span = { GridItemSpan(maxLineSpan) }) {
-            Text(
-                "Episodes",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(top = 12.dp),
-            )
+            Column(Modifier.padding(top = 18.dp, bottom = 2.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .width(3.dp)
+                            .height(15.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(AccentGradient),
+                    )
+                    Text(
+                        "EPISODES",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = OnBg,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 2.sp,
+                    )
+                    Text(
+                        "${data.episodes.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Muted,
+                    )
+                }
+                Spacer(Modifier.height(9.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(HairLine))
+                // Nothing uploaded on any site yet. Home promises this cannot
+                // happen (cards are pruned once a series page proves empty),
+                // but a card opened seconds before its first upload must say
+                // so plainly instead of showing an empty grid.
+                if (data.episodes.isEmpty()) {
+                    Text(
+                        "No episodes uploaded yet. Check back after the next release.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Muted,
+                        modifier = Modifier.padding(top = 14.dp),
+                    )
+                }
+            }
         }
         items(
             count = data.episodes.size,
@@ -194,9 +239,12 @@ private fun SeasonRow(
 ) {
     Column(Modifier.padding(top = 16.dp)) {
         Text(
-            "Seasons",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 8.dp),
+            "SEASONS",
+            style = MaterialTheme.typography.labelSmall,
+            color = Muted,
+            letterSpacing = 1.8.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 8.dp, start = 2.dp),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             seasons.forEach { season ->
@@ -205,8 +253,12 @@ private fun SeasonRow(
                 androidx.tv.material3.Button(
                     onClick = { if (!isCurrent) onOpenSeason(season) },
                     colors = androidx.tv.material3.ButtonDefaults.colors(
-                        containerColor = if (isCurrent) Primary else MaterialTheme.colorScheme.surfaceVariant,
+                        containerColor = if (isCurrent) Primary else SurfaceHi,
+                        contentColor = if (isCurrent) OnBg else Muted,
+                        focusedContainerColor = SurfaceHi,
+                        focusedContentColor = OnBg,
                     ),
+                    shape = androidx.tv.material3.ButtonDefaults.shape(shape = RoundedCornerShape(9.dp)),
                 ) {
                     Text(
                         "Season $n",
@@ -236,10 +288,40 @@ private fun InfoHeader(
                 .build(),
             contentDescription = data.anime.title,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.width(180.dp).height(250.dp),
+            modifier = Modifier
+                .width(180.dp)
+                .height(250.dp)
+                .clip(RoundedCornerShape(14.dp)),
         )
-        Column(Modifier.padding(start = 24.dp).fillMaxWidth()) {
-            Text(data.anime.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Column(Modifier.padding(start = 26.dp).fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    Modifier
+                        .width(22.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(AccentGradient),
+                )
+                Text(
+                    "SERIES",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Muted,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.8.sp,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                data.anime.title,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = OnBg,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text(
                 buildString {
                     append(if (data.episodes.size == 1) "1 episode" else "${data.episodes.size} episodes")
@@ -254,7 +336,9 @@ private fun InfoHeader(
                 },
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(top = 4.dp),
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.4.sp,
+                modifier = Modifier.padding(top = 6.dp),
             )
             androidx.tv.material3.Button(
                 onClick = onPlay,

@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -32,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.tv.material3.Border
@@ -78,10 +81,31 @@ fun SearchScreen(
             .padding(start = 40.dp, top = 28.dp, end = 36.dp, bottom = 24.dp),
     ) {
         Column(Modifier.width(384.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier
+                        .width(22.dp)
+                        .height(3.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                        .background(me.desidubanime.tv.ui.theme.AccentGradient),
+                )
+                Text(
+                    "FIND SOMETHING",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = me.desidubanime.tv.ui.theme.Muted,
+                    letterSpacing = 1.8.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
             Text(
                 "Search",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.headlineMedium,
+                color = me.desidubanime.tv.ui.theme.OnBg,
+                fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.padding(top = 6.dp),
             )
             OutlinedTextField(
                 value = query,
@@ -142,8 +166,8 @@ fun SearchScreen(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            "DesiDubAnime, AnimeDubHindi, AnimeDrive and ToonWorld4All are " +
-                                "searched together, so a title missing on one site still shows up.",
+                            "AnimeDubHindi, AnimeDrive and ToonWorld4All are searched " +
+                                "together, so a title missing on one site still shows up.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp),

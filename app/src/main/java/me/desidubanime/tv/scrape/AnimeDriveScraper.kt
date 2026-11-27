@@ -141,9 +141,6 @@ class AnimeDriveScraper(private val settings: AppSettings) {
      * wrapper's `url` parameter carries the real drive URL; it is URL-decoded
      * and used directly so no shortener hop is needed.
      *
-     * AnimeDrive posts don't carry a "Watch online" link to desidubanime,
-     * so [AdhEpisodePage.ddaSlug] is always null here â€” matching relies on
-     * title-key comparison against the DDA catalog (same as ADH pass 1).
      */
     suspend fun episodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
         // PLAIN HTTP FIRST, THEN THE BROWSER. link.animedrive.in now answers a
@@ -236,7 +233,7 @@ class AnimeDriveScraper(private val settings: AppSettings) {
         val episodes = byNumber.mapNotNull { (num, links) ->
             if (links.isEmpty()) null else HubEpisode(number = num, links = dedupe(links))
         }
-        return AdhEpisodePage(episodes = episodes.sortedBy { it.number }, ddaSlug = null)
+        return AdhEpisodePage(episodes = episodes.sortedBy { it.number })
     }
 
     /**

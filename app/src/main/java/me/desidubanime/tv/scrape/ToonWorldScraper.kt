@@ -160,7 +160,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
             val fromJson = propsEpisodes(html, url, singleNumber)
             if (fromJson.isNotEmpty()) {
                 DebugLog.log("T4A-scrape", "ep $singleNumber: ${fromJson.first().links.size} links (__PROPS__) ${url.substringAfterLast("/")}")
-                return TwEpisodePage(episodes = fromJson, ddaSlug = null)
+                return TwEpisodePage(episodes = fromJson)
             }
             // Diagnose on-device failures: was the JSON there at all?
             // (cache-poisoned body / CF challenge / shape change)
@@ -172,9 +172,9 @@ class ToonWorldScraper(private val settings: AppSettings) {
             val fromDom = domEpisode(html, url, singleNumber)
             if (fromDom.isNotEmpty()) {
                 DebugLog.log("T4A-scrape", "ep $singleNumber: ${fromDom.first().links.size} links (DOM fallback)")
-                return TwEpisodePage(episodes = fromDom, ddaSlug = null)
+                return TwEpisodePage(episodes = fromDom)
             }
-            return TwEpisodePage(emptyList(), ddaSlug = null)
+            return TwEpisodePage(emptyList())
         }
 
         // ---- legacy combined listing: document-order walk ----
@@ -333,7 +333,7 @@ class ToonWorldScraper(private val settings: AppSettings) {
             if (ls.isEmpty()) null else TwEpisode(number = num, links = dedupe(ls))
         }
         DebugLog.log("T4A-scrape", "Found ${episodes.size} episodes with links from ${url.substringAfterLast("/")}")
-        return TwEpisodePage(episodes = episodes.sortedBy { it.number }, ddaSlug = null)
+        return TwEpisodePage(episodes = episodes.sortedBy { it.number })
     }
 
     private fun originOf(url: String): String =

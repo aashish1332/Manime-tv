@@ -49,8 +49,6 @@ data class TwInfo(
 /** All hubcloud links for one episode, parsed from the toonworld episode page. */
 data class TwEpisodePage(
     val episodes: List<TwEpisode>,
-    /** desidubanime anime slug from the "Watch online" link — definitive cross-site match. */
-    val ddaSlug: String? = null,
 )
 
 /** One episode with its quality links. */

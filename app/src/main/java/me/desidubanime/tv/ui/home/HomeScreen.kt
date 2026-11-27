@@ -1,12 +1,15 @@
 ﻿package me.desidubanime.tv.ui.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,12 +30,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -45,6 +55,11 @@ import me.desidubanime.tv.ui.common.LoadingScreen
 import me.desidubanime.tv.ui.common.Spinner
 import me.desidubanime.tv.ui.common.UiState
 import me.desidubanime.tv.ui.common.WatchCard
+import me.desidubanime.tv.ui.theme.AccentGradient
+import me.desidubanime.tv.ui.theme.HairLine
+import me.desidubanime.tv.ui.theme.Muted
+import me.desidubanime.tv.ui.theme.OnBg
+import me.desidubanime.tv.ui.theme.SurfaceHi
 
 @Composable
 fun HomeScreen(
@@ -194,14 +209,37 @@ private fun HomeSections(
         onOpenAnime(a)
     }
     if (feed.all.isEmpty()) {
-        Text("No anime found.", Modifier.padding(24.dp))
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    Modifier
+                        .width(44.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(AccentGradient),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Nothing to show yet",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = OnBg,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Press Refresh to check the sites again.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Muted,
+                )
+            }
+        }
         return
     }
     LazyVerticalGrid(
         columns = GridCells.Fixed(6),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        contentPadding = PaddingValues(vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 40.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
         // Auto-rotating hero of the newest content (new episodes first).
@@ -272,25 +310,35 @@ private fun Sidebar(
     val feedLoading by loadingFlow.collectAsStateWithLifecycle()
     Column(
         Modifier
-            .width(176.dp)
+            .width(168.dp)
             .padding(start = 12.dp, top = 24.dp, end = 4.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
-            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-        ) {
-            Text(
-                "Manime",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(4.dp))
+        Column(Modifier.padding(start = 8.dp, bottom = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(AccentGradient),
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "MANIME",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = OnBg,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 3.sp,
+                )
+            }
+            Spacer(Modifier.height(3.dp))
             Text(
                 "made/built by Manu",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Muted,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(start = 18.dp),
             )
         }
         SidebarItem("Home", selectedPage == 0 && contentMode != "TW", icon = Icons.Default.Home, onClick = onSelectHome)
@@ -303,19 +351,21 @@ private fun Sidebar(
             onClick = onRefresh,
         )
         Text(
-            "TW4A",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp, start = 8.dp),
+            "T4A LIBRARY",
+            style = MaterialTheme.typography.labelSmall,
+            color = Muted,
+            letterSpacing = 1.4.sp,
+            modifier = Modifier.padding(top = 14.dp, start = 10.dp),
         )
         SidebarItem("All TW4A Anime", selected = contentMode == "TW", onClick = onOpenTwAnime)
         SidebarItem("Search", false, icon = Icons.Default.Search, onClick = onOpenSearch)
         SidebarItem("Settings", false, icon = Icons.Default.Settings, onClick = onOpenSettings)
         Text(
-            "Pages",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp, start = 8.dp),
+            "BROWSE",
+            style = MaterialTheme.typography.labelSmall,
+            color = Muted,
+            letterSpacing = 1.4.sp,
+            modifier = Modifier.padding(top = 14.dp, start = 10.dp),
         )
         // DDA paginates 30/page; the count comes live from X-WP-TotalPages so
         // the sidebar grows automatically as new anime are uploaded.
@@ -338,15 +388,28 @@ private fun SidebarItem(
     Button(
         onClick = onClick,
         enabled = enabled,
-        colors = androidx.tv.material3.ButtonDefaults.colors(
-            containerColor = if (selected) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
+        colors = ButtonDefaults.colors(
+            // Unselected rows are INVISIBLE until focused: the rail reads as a
+            // list of names, not a stack of grey buttons, and focus does the
+            // work television remotes are made for.
+            containerColor = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
+            contentColor = if (selected) OnBg else Muted,
+            focusedContainerColor = SurfaceHi,
+            focusedContentColor = OnBg,
         ),
+        shape = ButtonDefaults.shape(shape = RoundedCornerShape(10.dp)),
         modifier = Modifier.fillMaxWidth(),
     ) {
+        if (selected) {
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(OnBg),
+            )
+            Spacer(Modifier.width(9.dp))
+        }
         if (spinning) {
             Spinner(
                 modifier = Modifier.size(16.dp),
@@ -429,12 +492,31 @@ private fun DeleteHistoryDialog(
 
 private fun androidx.compose.foundation.lazy.grid.LazyGridScope.sectionHeader(title: String) {
     item(key = "header-$title", span = { GridItemSpan(maxLineSpan) }) {
-        Text(
-            title,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(top = 8.dp),
-        )
+        // Editorial masthead: accent rule, wide-tracked caps, hairline. It
+        // gives the rows a rhythm the flat red labels never had.
+        Column(Modifier.padding(top = 20.dp, bottom = 2.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    Modifier
+                        .width(3.dp)
+                        .height(15.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(AccentGradient),
+                )
+                Text(
+                    title.uppercase(),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = OnBg,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 2.sp,
+                )
+            }
+            Spacer(Modifier.height(9.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(HairLine))
+        }
     }
 }
 

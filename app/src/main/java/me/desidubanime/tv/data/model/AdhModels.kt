@@ -68,6 +68,4 @@ data class HubEpisode(
 /** Everything parsed from an adhlinks episode page. */
 data class AdhEpisodePage(
     val episodes: List<HubEpisode>,
-    /** desidubanime anime slug from the "Watch online" link — definitive cross-site match. */
-    val ddaSlug: String? = null,
 )

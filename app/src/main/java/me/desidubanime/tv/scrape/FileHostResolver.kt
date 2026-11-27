@@ -310,12 +310,15 @@ object FileHostResolver {
             // the crawl and browser stages, which cannot resolve a minted CDN
             // link, and the viewer saw GDFlix fail on a link that was alive.
             // Each request is bounded by gdflixClient's own call timeout.
+            val gdStart = System.currentTimeMillis()
             if (msLeft(deadline) >= 1_000L) {
+                DebugLog.log("resolve", "GDFlix: mint stage start (${msLeft(deadline)}ms of budget left)")
                 val mint = runCatching { gdflixInstant(pageUrl) }
                     .onFailure {
                         DebugLog.log("gdflix", "mint threw ${it.javaClass.simpleName}: ${it.message}")
                     }
                     .getOrNull()
+                DebugLog.log("resolve", "GDFlix: mint stage took ${System.currentTimeMillis() - gdStart}ms")
                 mint?.stream?.let {
                     DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
                     return@withContext it
@@ -1373,27 +1376,46 @@ object FileHostResolver {
      * that don't offer them, which is why they are only tried afterwards.
      */
     private suspend fun gdflixInstant(pageUrl: String): GdfMint = withContext(Dispatchers.IO) {
-        val fetched = fetchFollowing(pageUrl, gdflixClient) ?: return@withContext GdfMint()
+        // STAGE TIMING. A GDFlix row that dies has exactly four possible
+        // graves: the page fetch, the key read, the mint POST, and the probe of
+        // the minted URL. Until now the log only ever said "GDFlix failed",
+        // which is why the last two rounds of this bug were guesswork. Each
+        // stage now logs its own duration and what it got back, so ONE failing
+        // row in the on-screen log names the stage that ate the time.
+        val t0 = System.currentTimeMillis()
+        fun since() = System.currentTimeMillis() - t0
+
+        DebugLog.log("gdflix", "1/4 page: GET ${short(pageUrl)}")
+        val fetched = fetchFollowing(pageUrl, gdflixClient)
+        if (fetched == null) {
+            DebugLog.log("gdflix", "1/4 page: NO RESPONSE after ${since()}ms")
+            return@withContext GdfMint()
+        }
         val (finalUrl, html) = fetched
+        DebugLog.log("gdflix", "1/4 page: ${html.length}b from ${short(finalUrl)} in ${since()}ms")
         if (looksLikeChallenge(html)) {
-            DebugLog.log("gdflix", "challenge on ${short(finalUrl)}")
+            DebugLog.log("gdflix", "1/4 page: CHALLENGE page at ${since()}ms")
             return@withContext GdfMint()
         }
         if (isRemovedUpload(html)) {
-            DebugLog.log("gdflix", "upload removed: ${short(finalUrl)}")
+            DebugLog.log("gdflix", "1/4 page: site says upload removed, at ${since()}ms")
             return@withContext GdfMint(removed = true)
         }
-        // Key is double-quoted inside formData.append — a page without it is
+        // Key is double-quoted inside formData.append - a page without it is
         // the site's generic shell (file removed), so bail early.
         val key = Regex("""formData\.append\(\s*"key"\s*,\s*"([A-Fa-f0-9]{16,})"\s*\)""")
             .find(html)?.groupValues?.get(1)
             ?: Regex(""""key"\s*,\s*"([A-Fa-f0-9]{16,})"""").find(html)?.groupValues?.get(1)
             ?: run {
-                DebugLog.log("gdflix", "no key on page (${html.length}b) — likely removed upload")
+                DebugLog.log("gdflix", "2/4 key: none on page (${html.length}b) at ${since()}ms - likely a removed upload")
                 null
             }
             ?: return@withContext GdfMint(removed = isRemovedUpload(html))
-        val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: return@withContext GdfMint()
+        val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: run {
+            DebugLog.log("gdflix", "2/4 key: read in ${since()}ms but host unparsable from ${short(finalUrl)}")
+            null
+        } ?: return@withContext GdfMint()
+        DebugLog.log("gdflix", "2/4 key: ${key.take(8)}... + host $host in ${since()}ms")
         val tokenHost = host.removePrefix("https://").removePrefix("http://")
         val mPath = if (finalUrl.contains("/file/")) finalUrl.replace("/file/", "/mfile/") else finalUrl
         var deadMint = false
@@ -1409,31 +1431,39 @@ object FileHostResolver {
                 .header("x-token", tokenHost)
                 .header("Referer", finalUrl)
                 .build()
+            val postAt = System.currentTimeMillis()
             val json = runCatching { gdflixClient.newCall(req).execute().use { readCapped(it) } }.getOrNull()
-                ?: continue
+            val postMs = System.currentTimeMillis() - postAt
+            if (json == null) {
+                DebugLog.log("gdflix", "3/4 $action: POST failed (no response) in ${postMs}ms")
+                continue
+            }
             val raw = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
                 ?: Regex(""""visit_url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
             if (raw == null) {
-                DebugLog.log("gdflix", "$action: ${json.replace(Regex("\\s+"), " ").take(150)}")
+                DebugLog.log("gdflix", "3/4 $action: no url in ${postMs}ms - ${json.replace(Regex("\\s+"), " ").take(150)}")
                 continue
             }
             val url = raw.replace("\\/", "/")
-            if (!url.startsWith("http")) continue
-            DebugLog.log("gdflix", "$action -> ${short(url)}")
+            if (!url.startsWith("http")) {
+                DebugLog.log("gdflix", "3/4 $action: non-http url in ${postMs}ms - ${url.take(80)}")
+                continue
+            }
+            DebugLog.log("gdflix", "3/4 $action: minted ${short(url)} in ${postMs}ms (total ${since()}ms)")
             // A 4xx FROM GOOGLE ENDS THE ROW; IT IS NOT A REASON TO CRAWL.
             // Measured live (2026-11-26): the mint answers
-            // {"error":false,"info":"Success","url":"https://video-downloads…"}
+            // {"error":false,"info":"Success","url":"https://video-downloads..."}
             // and that URL then answers 400 text/html, Content-Length: 0,
-            // Server: UploadServer for a dead or quota-exhausted Drive copy —
+            // Server: UploadServer for a dead or quota-exhausted Drive copy -
             // byte-identical to what a garbage token gets. Nothing on gdflix's
             // side recovers it: /cloud/<ts>/<id> and /cflare/<ts>/<id> return
             // the same shell, the busycdn anchor answers 500, /api/* is the
             // SPA, and re-minting yields the same dead token. The crawl and
-            // browser stages below therefore cannot succeed — they only add a
+            // browser stages below therefore cannot succeed - they only add a
             // WebView session before the row dies.
             // A 4xx FROM THE CDN MEANS THIS ACTION'S URL IS DEAD, NOT THAT THE
             // ROW IS. "direct" and "original" can mint a DIFFERENT URL for the
-            // same upload, and they used to be skipped entirely — the row died
+            // same upload, and they used to be skipped entirely - the row died
             // on the first rejected mint even though a sibling action could
             // still have produced a live file. Every action is now tried; only
             // when ALL of them hand back a rejected URL is the upload gone.
@@ -1442,24 +1472,36 @@ object FileHostResolver {
             // dislikes a foreign referer answers 403, a probe burst answers
             // 429, and neither says anything about the file. 400 does
             // (measured: a dead Drive copy answers 400, `Content-Length: 0`,
-            // `Server: UploadServer` — byte-identical to a garbage token).
+            // `Server: UploadServer` - byte-identical to a garbage token).
+            val probeAt = System.currentTimeMillis()
             val mintedStatus = statusOf(url)
+            DebugLog.log("gdflix", "4/4 $action: probe $mintedStatus in ${System.currentTimeMillis() - probeAt}ms")
             val deadStatus = when {
                 mintedStatus == null -> false
                 mintedStatus == 403 || mintedStatus == 429 -> {
+                    val retryAt = System.currentTimeMillis()
                     val retry = statusOf(url, referer = false)
-                    DebugLog.log("gdflix", "$action re-probe without referer -> $retry")
+                    DebugLog.log(
+                        "gdflix",
+                        "4/4 $action: re-probe without referer -> $retry in ${System.currentTimeMillis() - retryAt}ms",
+                    )
                     retry != null && retry in 400..499
                 }
                 mintedStatus in 400..499 -> true
                 else -> false
             }
             if (deadStatus) {
-                DebugLog.log("gdflix", "$action minted URL rejected ($mintedStatus)")
+                DebugLog.log("gdflix", "4/4 $action: minted URL rejected ($mintedStatus) at ${since()}ms total")
                 deadMint = true
                 continue
             }
-            when (verdictOf(url, browser = null, method = "GET", ranged = true)) {
+            val verdictAt = System.currentTimeMillis()
+            val verdict = verdictOf(url, browser = null, method = "GET", ranged = true)
+            DebugLog.log(
+                "gdflix",
+                "4/4 $action: verdict $verdict in ${System.currentTimeMillis() - verdictAt}ms (total ${since()}ms)",
+            )
+            when (verdict) {
                 Verdict.FILE -> return@withContext GdfMint(stream(url, null))
                 // A PAGE answer means the mint returned a shortener/interstitial;
                 // one cheap crawl still beats failing the server outright.
@@ -1468,6 +1510,7 @@ object FileHostResolver {
                 else -> Unit
             }
         }
+        DebugLog.log("gdflix", "mint gave up after ${since()}ms (every action rejected = $deadMint)")
         if (deadMint) return@withContext GdfMint(removed = true)
         GdfMint()
     }

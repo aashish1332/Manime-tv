@@ -21,13 +21,14 @@ data class Anime(
     val twPostId: Int? = null,
     val twEpisodesUrl: String? = null,
     /**
-     * True when DDA marks this "Upcoming" / "Not yet released" — the card has
-     * 0 episodes and must stay off the home screen until the first upload.
+     * True when the source marks this "Upcoming" / "Not yet released" — the
+     * card has 0 episodes and must stay off the home screen until the first
+     * upload.
      */
     val upcoming: Boolean = false,
     /**
-     * When this anime's newest episode landed (max across DDA episode feed and
-     * ADH post modified). Set on home-feed entries; drives NEW EPISODE badges.
+     * When this anime's newest episode landed (the newest source post stamp).
+     * Set on home-feed entries; drives NEW EPISODE badges.
      */
     val latestEpisodeAt: String = "",
     /**
@@ -59,29 +60,11 @@ data class Episode(
     val numberInt: Int,          // 1  (parsed for ordering / next)
     val title: String,
     val thumbnail: String,
-    val watchUrl: String,        // /watch/... page ("" when the episode is ADH-only)
     /** HubCloud quality links from AnimeDubHindi for this episode. */
     val hubLinks: List<HubLink> = emptyList(),
 )
 
 enum class ServerGroup { SUB, DUB, RAW }
-
-/** A playable server option decoded from the episode page. */
-data class Server(
-    val name: String,            // "CLOUD", "Mirrordub", ...
-    val embedUrl: String,        // the iframe/embed url
-    val group: ServerGroup,
-    /** CLOUD-type servers expand into sub-servers (SERVER 1 / SERVER 2 ...). */
-    val isCloud: Boolean = false,
-    /** Mirrordub/gdmirrorbot aggregators expand into named sub-servers too. */
-    val isMirror: Boolean = false,
-)
-
-/** A sub-server inside a CLOUD/mirror aggregator. */
-data class SubServer(
-    val name: String,            // "SERVER 1"
-    val playUrl: String,         // absolute url to the /play/ page
-)
 
 /** Result of resolving a server to something the player can use. */
 sealed interface Playable {

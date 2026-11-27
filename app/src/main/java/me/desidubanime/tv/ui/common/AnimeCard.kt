@@ -1,6 +1,7 @@
 package me.desidubanime.tv.ui.common
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -25,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -41,6 +43,8 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import me.desidubanime.tv.data.api.Api
 import me.desidubanime.tv.data.model.Anime
+import me.desidubanime.tv.ui.theme.Gold
+import me.desidubanime.tv.ui.theme.PosterScrim
 import me.desidubanime.tv.ui.theme.Primary
 
 /** A focusable poster tile used in the Home / Search grids. */
@@ -101,6 +105,13 @@ fun AnimeCard(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
+            // A single static gradient keeps the badges legible on bright
+            // artwork. No blur, no animation — it must cost one draw call.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(PosterScrim),
+            )
             if (isNew) NewBadge(Modifier.align(Alignment.TopEnd), text = badgeText)
             // Source badges: show which sites have this anime (ADH > AD > DDA).
             SourceBadges(
@@ -112,6 +123,7 @@ fun AnimeCard(
             text = anime.title,
             active = focused,
             style = MaterialTheme.typography.bodySmall,
+            color = if (focused) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
             modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -124,14 +136,17 @@ fun AnimeCard(
 fun NewBadge(modifier: Modifier = Modifier, text: String = "NEW") {
     Text(
         text,
-        color = androidx.compose.ui.graphics.Color.White,
+        // Ink on gold: freshness is a different signal from selection, so it
+        // must not borrow the accent colour.
+        color = androidx.compose.ui.graphics.Color(0xFF120E02),
         style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Bold,
+        fontWeight = FontWeight.ExtraBold,
+        letterSpacing = 0.8.sp,
         modifier = modifier
             .padding(6.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(Primary)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .clip(RoundedCornerShape(6.dp))
+            .background(Brush.horizontalGradient(listOf(Gold, Color(0xFFFFA94D))))
+            .padding(horizontal = 7.dp, vertical = 2.dp),
     )
 }
 
@@ -144,19 +159,20 @@ const val POSTER_ASPECT = 2f / 3f
  * DDA (orange). Priority order: ADH > AD > T4A > DDA — badges render
  * left-to-right in this order, all together with the poster.
  *
- * ALWAYS DRAWN. This used to return early until Anime.sourcesResolved was set,
- * i.e. until all three site catalogs had landed (measured: ~20s, and up to the
- * 60s grace when one site was slow). The grid therefore painted bare posters
- * and the tags popped in later, or never — which is what "the provider tags do
- * not show" was. The first merge already knows every source it matched, and a
- * card that is older than a site's latest-100 window is corrected when that
- * catalog lands and the feed re-merges.
+ * ATOMIC. One badge per site, all of them in the same frame, and only once the
+ * card's source set is final ([Anime.sourcesResolved]) — i.e. after a merge
+ * that could see every catalogue. Drawing a partial set is what made the tags
+ * "pop in one by one": Home paints the disk cache first, which was merged
+ * before the second and third catalogues landed, so ADH appeared, then AD, then
+ * T4A seconds later. Bare posters for one refresh beat a set that changes under
+ * the viewer's eyes.
  *
  * Called from a LazyVerticalGrid — the badge list is remembered per source id
  * so a recompose doesn't rebuild it fresh every frame.
  */
 @Composable
 fun SourceBadges(anime: Anime, modifier: Modifier = Modifier) {
+    if (!anime.sourcesResolved) return
     val badges = remember(anime.adhPostId, anime.adPostId, anime.twPostId, anime.id) {
         buildList {
             if (anime.hasAdh) add("ADH" to Color(0xFF2196F3))   // blue
@@ -175,10 +191,12 @@ fun SourceBadges(anime: Anime, modifier: Modifier = Modifier) {
                 color = Color.White,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(color)
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                    .clip(RoundedCornerShape(50))
+                    .background(color.copy(alpha = 0.94f))
+                    .border(0.5.dp, Color(0x40FFFFFF), RoundedCornerShape(50))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
             )
         }
     }

@@ -17,7 +17,6 @@ import me.desidubanime.tv.data.ServiceLocator
 import me.desidubanime.tv.data.history.WatchEntry
 import me.desidubanime.tv.data.model.Episode
 import me.desidubanime.tv.data.model.Playable
-import me.desidubanime.tv.data.model.Server
 import me.desidubanime.tv.data.model.ServerGroup
 
 /**

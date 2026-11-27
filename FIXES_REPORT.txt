@@ -1500,3 +1500,81 @@ CHECKS
 NOT VERIFIED: no adb/TV here. On-device: GDFlix playback, the AD WebView page
 on link.animedrive.in, T4A rows in the menu, and frame timing are compiled
 and built, not watched.
+
+================================================================
+L. v1.2.8 — ZERO-EPISODE CARDS, ATOMIC TAGS, A NEW FACE
+================================================================
+
+1. CARDS WITH 0 EPISODES
+
+Measured before touching code (2026-11-27):
+- `Anime.upcoming` is never set to true anywhere any more; the DDA-driven
+  marker died with the site, so `.filter { !it.upcoming }` removed NOTHING.
+  That is why announced-but-unaired titles reached Home.
+- All three sites publish the SERIES page before the first file:
+  * ADH post 3923 (Apothecary Diaries S3, unreleased) links an adhlinks page
+    that answers 200 and a normal-looking 198 KB shell with 0 hubcloud and 0
+    gdflix links.
+  * An announced season's adhlinks page is byte-indistinguishable from a
+    healthy one until you count links (the healthy Fool Night page has 24
+    "Episode N" headings and 100 hubcloud links).
+  * TW posts carry `/episode/` links (3-19 on the newest six). AD posts carry
+    exactly one `link.animedrive.in/...-download/` series link.
+  So "the post exists" cannot be the test, and no listing field gives a count.
+
+What is in place now:
+- New `EpisodeProbeStore` (episode_probes.json, 600 entries) records, per
+  `<source>:<postId>`, how many episode links that series page held and when.
+- `pruneEmpty()` drops a card only when EVERY source it has was re-read twice
+  and held nothing. Unproven stays visible; one live source keeps the card —
+  that is exactly the "announced on AD, already airing on ADH" case. Zeros are
+  double-checked because an empty parse is also what a dropped connection
+  looks like, and hiding a real anime is worse than showing an empty one for
+  one more refresh.
+- After the feed is on screen, `verifyEmptyCards()` reads the newest 10 cards
+  that are unknown or older than 12 h, two at a time, on the bulk lane, after
+  the idle window. A newly-empty title therefore leaves Home on its own, and
+  re-merges once (no user action).
+- Detail opens record their own counts, so anything the viewer actually looks
+  at is proven for next time.
+- The detail screen now says "No episodes uploaded yet…" instead of an empty
+  grid.
+
+2. TAGS THAT ARRIVE TOGETHER
+
+`SourceBadges` used to draw whatever the current merge had matched ("ALWAYS
+DRAWN"), so the first paint showed ADH, and AD/T4A popped in seconds later as
+catalogues landed. It is atomic now: nothing until the card's set is final
+(`sourcesResolved`, i.e. a merge that could see every catalogue), then all of
+its badges in one frame. The release valve that opens that gate when a site is
+unreachable went from 60 s to 8 s so a dead site cannot leave cards tagless.
+
+3. THE FACE
+
+Same layout, same behaviour, different identity — "neon noir", not the flat
+black/red every client ships:
+- Palette: ink #06060B, magenta primary #FF2D6F, violet accent #7C5CFF, gold
+  #FFC857 reserved for NEW ribbons (freshness must not look like selection).
+  Rounded shape scale added to the TV theme.
+- Poster cards: one static gradient scrim, gold gradient ribbon, pill-shaped
+  source badges with a hairline edge, titles that go from muted to white on
+  focus (existing marquee and 1.07 lift kept).
+- Rail: a brand lockup (gradient dot + tracked MANIME + credit), invisible
+  unselected rows (a list of names, not a stack of grey buttons), accent
+  indicator on the selected row, uppercase section labels.
+- Section headers: accent rule + wide-tracked caps + hairline — on Home,
+  "EPISODES" and "SEASONS".
+- Hero: 272 dp, ink-to-transparent scrim, accent kicker rule, headlineMedium
+  title, its own source badges.
+- Search: "FIND SOMETHING" kicker + display title; the copy no longer names
+  DesiDubAnime.
+- Cost: every effect is a static gradient or a single animated value. No blur
+  (RenderEffect), no per-frame work, `contentType` kept everywhere.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS - 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,277,437 bytes)
+NOT VERIFIED: no adb/TV here, so nothing visual was watched and the probe
+timing on a real box is unknown. The tag/empty-card behaviour is compiled and
+built, not observed on a television.

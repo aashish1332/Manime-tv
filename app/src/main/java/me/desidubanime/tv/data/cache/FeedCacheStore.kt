@@ -11,10 +11,10 @@ import java.io.File
 /**
  * What the last successful feed build already covered.
  *
- * The feed merges four sites, and one of them (DDA) is a REST API that can
- * answer "what changed since …" itself. Remembering the newest stamp each
- * source contributed turns a refresh into two small REST calls plus a few
- * string comparisons instead of re-downloading and re-merging every catalog.
+ * The feed merges three sites. Remembering the newest stamp each source
+ * contributed turns a refresh into a "what changed since …" question plus a
+ * few string comparisons instead of re-downloading and re-merging every
+ * catalog.
  *
  * Stamps are kept as the sites' own ISO strings, not parsed dates: this app
  * already orders by those strings everywhere, and comparing them needs no
@@ -22,10 +22,6 @@ import java.io.File
  */
 @Serializable
 data class FeedCursor(
-    /** Newest DDA `modified` in the last build (feeds `modified_after`). */
-    val ddaModified: String = "",
-    /** Newest DDA episode `date` in the last build (feeds `after`). */
-    val episodeDate: String = "",
     val adhModified: String = "",
     val adModified: String = "",
     val twModified: String = "",

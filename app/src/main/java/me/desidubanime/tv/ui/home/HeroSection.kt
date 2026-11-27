@@ -38,6 +38,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -46,6 +47,9 @@ import coil.request.ImageRequest
 import kotlinx.coroutines.delay
 import me.desidubanime.tv.data.api.Api
 import me.desidubanime.tv.data.model.Anime
+import me.desidubanime.tv.ui.common.SourceBadges
+import me.desidubanime.tv.ui.theme.HeroScrim
+import me.desidubanime.tv.ui.theme.Accent
 
 /**
  * Auto-rotating hero banner: cycles through the newest content every few
@@ -78,7 +82,7 @@ fun HeroSection(
     Box(
         modifier
             .fillMaxWidth()
-            .height(240.dp)
+            .height(272.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(Color(0xFF0A0A0A)),
     ) {
@@ -104,33 +108,36 @@ fun HeroSection(
                     alpha = 0.35f,
                     modifier = Modifier.fillMaxSize(),
                 )
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.horizontalGradient(
-                                0.0f to Color(0xE6000000),
-                                0.55f to Color(0x99000000),
-                                1.0f to Color.Transparent,
-                            ),
-                        ),
-                )
+                Box(Modifier.fillMaxSize().background(HeroScrim))
                 Row(Modifier.fillMaxSize().padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         // The hero rotates the newest content, but not every
                         // slide is a new RELEASE — some are a new EPISODE of an
                         // older show. Say which one it is instead of stamping
                         // "NEW" on everything.
-                        Text(
-                            badgeFor(anime) ?: "FEATURED",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(
+                                Modifier
+                                    .width(22.dp)
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(Accent),
+                            )
+                            Text(
+                                (badgeFor(anime) ?: "FEATURED").uppercase(),
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.6.sp,
+                            )
+                        }
                         Text(
                             anime.title,
                             color = Color.White,
-                            style = MaterialTheme.typography.headlineSmall,
+                            style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
@@ -144,6 +151,7 @@ fun HeroSection(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
+                        SourceBadges(anime)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                             Button(
                                 onClick = { onOpen(anime) },
@@ -163,7 +171,7 @@ fun HeroSection(
                                             else -> false
                                         }
                                     },
-                            ) { Text("▶  View") }
+                            ) { Text("▶  Watch now") }
                             Dots(count = items.size, active = index)
                         }
                     }

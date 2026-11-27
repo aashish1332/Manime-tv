@@ -1,8 +1,7 @@
 package me.desidubanime.tv.data
 
 import me.desidubanime.tv.App
-import me.desidubanime.tv.data.cache.AdhSlugStore
-import me.desidubanime.tv.data.cache.EnglishTitleStore
+import me.desidubanime.tv.data.cache.EpisodeProbeStore
 import me.desidubanime.tv.data.cache.FeedCacheStore
 import me.desidubanime.tv.data.cache.SeenStore
 import me.desidubanime.tv.data.history.WatchHistoryStore
@@ -24,9 +23,8 @@ object ServiceLocator {
     val repository: AnimeRepository by lazy {
         AnimeRepository(
             settings = settings,
-            slugStore = AdhSlugStore(App.instance),
             feedStore = FeedCacheStore(App.instance),
-            titleStore = EnglishTitleStore(App.instance),
+            probeStore = EpisodeProbeStore(App.instance),
         )
     }
     val watchHistory: WatchHistoryStore by lazy { WatchHistoryStore(App.instance) }

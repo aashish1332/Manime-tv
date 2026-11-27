@@ -3,9 +3,9 @@ package me.desidubanime.tv.data.repo
 import me.desidubanime.tv.data.DebugLog
 import me.desidubanime.tv.data.api.InteractionGate
 import me.desidubanime.tv.data.api.Network
-import me.desidubanime.tv.data.cache.AdhSlugStore
-import me.desidubanime.tv.data.cache.EnglishTitleStore
+import me.desidubanime.tv.data.cache.EpisodeProbeStore
 import me.desidubanime.tv.data.cache.FeedCacheStore
+import me.desidubanime.tv.data.cache.ProbeEntry
 import me.desidubanime.tv.data.cache.FeedCursor
 import me.desidubanime.tv.data.model.AdhEpisodePage
 import me.desidubanime.tv.data.model.AdhInfo
@@ -15,8 +15,6 @@ import me.desidubanime.tv.data.model.HomeFeed
 import me.desidubanime.tv.data.model.HubEpisode
 import me.desidubanime.tv.data.model.HubLink
 import me.desidubanime.tv.data.model.LinkSource
-import me.desidubanime.tv.data.model.Server
-import me.desidubanime.tv.data.model.SubServer
 import me.desidubanime.tv.data.model.TwEpisode
 import me.desidubanime.tv.data.model.TwEpisodePage
 import me.desidubanime.tv.data.model.TwInfo
@@ -41,9 +39,8 @@ import org.jsoup.parser.Parser
 
 class AnimeRepository(
     private val settings: AppSettings,
-    private val slugStore: AdhSlugStore? = null,
     private val feedStore: FeedCacheStore? = null,
-    private val titleStore: EnglishTitleStore? = null,
+    private val probeStore: EpisodeProbeStore? = null,
 ) {
     private val adh = AdhScraper(settings)
     private val ad = AnimeDriveScraper(settings)
@@ -58,15 +55,6 @@ class AnimeRepository(
     private val bgScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + Dispatchers.IO,
     )
-
-    /**
-     * Completes once the persisted slug/title maps are in memory. Declared here,
-     * BEFORE the loader that completes it (see the init block at the bottom of
-     * the class): Kotlin runs property initialisers in declaration order, so a
-     * deferred declared below its user is still null when the loader coroutine
-     * starts on another thread.
-     */
-    private val storesLoaded = CompletableDeferred<Unit>()
 
     @Volatile
     private var sweepsStarted = false
@@ -170,6 +158,158 @@ class AnimeRepository(
     private fun sourcesComplete(): Boolean =
         sourcesGraceElapsed || sourcesCompleteRaw()
 
+    /**
+     * `<source>:<postId>` -> what that series page was last PROVEN to hold.
+     *
+     * Home promises episodes. All three sites publish a series page weeks
+     * before the first file exists (measured 2026-11-27: an announced season
+     * answers 200 with a normal-looking page carrying zero episode links), so
+     * "the post exists" cannot be the test — the only proof is reading that
+     * page, and the answer is worth keeping. Keys: `adh:` / `ad:` / `tw:`.
+     */
+    private val episodeProbes = java.util.concurrent.ConcurrentHashMap<String, ProbeEntry>()
+
+    /**
+     * Load last session's probes as soon as the repository exists. Until this
+     * lands, every card counts as unproven and stays visible — the store can
+     * only ever REMOVE cards, never invent them, so a slow load costs nothing
+     * but a little patience. A zero that was already double-checked last
+     * session triggers one re-merge so the stale card leaves the screen.
+     */
+    init {
+        bgScope.launch {
+            runCatching { probeStore?.load() }.getOrNull().orEmpty()
+                .forEach { (k, v) -> episodeProbes.putIfAbsent(k, v) }
+            if (episodeProbes.values.any { it.count == 0 && it.zeros >= ZERO_STRIKES }) {
+                runCatching { refreshFeedIfSourcesComplete(delayMs = 0L) }
+            }
+        }
+    }
+
+    /** `<source>:<postId>` for every site this card can be played from. */
+    private fun probeKeys(a: Anime): List<String> = buildList {
+        a.adhPostId?.let { add("adh:$it") }
+        a.adPostId?.let { add("ad:$it") }
+        a.twPostId?.let { add("tw:$it") }
+    }
+
+    /**
+     * Remember what a series page held.
+     *
+     * A POSITIVE answer is definitive and resets the strike count. A zero is
+     * one strike: the same page is parsed twice before a card is declared
+     * empty, because an empty parse is also what a dropped connection looks
+     * like, and hiding a real anime is far worse than showing an empty one for
+     * one more refresh. Two independent looks, then it goes.
+     */
+    private fun recordProbe(key: String, count: Int) {
+        val prev = episodeProbes[key]
+        val now = System.currentTimeMillis()
+        val next = if (count > 0) {
+            ProbeEntry(count = count, at = now, zeros = 0)
+        } else {
+            ProbeEntry(
+                count = 0,
+                at = now,
+                zeros = if (prev != null && prev.count > 0) 1 else (prev?.zeros ?: 0) + 1,
+            )
+        }
+        episodeProbes[key] = next
+        bgScope.launch { runCatching { probeStore?.put(mapOf(key to next)) } }
+    }
+
+    /**
+     * Keep a card only while at least one of its sites is not proven empty.
+     *
+     * "Unproven" always keeps the card: this filter exists to remove titles
+     * that provably have nothing to play, never to hide things it is unsure
+     * about. A fresh zero for ONE source with another source live keeps it —
+     * that is exactly the "announced on AnimeDrive, already airing on ADH" case.
+     */
+    private fun pruneEmpty(list: List<Anime>): List<Anime> {
+        val now = System.currentTimeMillis()
+        return list.filter { a ->
+            val keys = probeKeys(a)
+            if (keys.isEmpty()) return@filter true
+            val fresh = keys.mapNotNull { k ->
+                episodeProbes[k]?.takeIf { now - it.at < PROBE_TTL_MS }
+            }
+            if (fresh.size < keys.size) return@filter true
+            fresh.any { it.count > 0 || it.zeros < ZERO_STRIKES }
+        }
+    }
+
+    /**
+     * Background proof for the newest cards, so an announced-but-unaired title
+     * leaves Home on its own instead of waiting for the viewer to open it.
+     *
+     * Bounded on purpose: [VERIFY_CARDS_PER_BUILD] pages per feed build, two at
+     * a time on the bulk lane, after a quiet window. Each verified page is
+     * persisted, so a title costs ONE fetch on this device (and none again
+     * until [PROBE_TTL_MS]).
+     */
+    private suspend fun verifyEmptyCards(cards: List<Anime>) {
+        InteractionGate.awaitQuiet(QUIET_BEFORE_BACKGROUND_MS)
+        val now = System.currentTimeMillis()
+        val todo = cards.asSequence()
+            .filter { a ->
+                probeKeys(a).any { k ->
+                    val p = episodeProbes[k]
+                    p == null || now - p.at > PROBE_TTL_MS
+                }
+            }
+            .take(VERIFY_CARDS_PER_BUILD)
+            .toList()
+        if (todo.isEmpty()) return
+        val sem = kotlinx.coroutines.sync.Semaphore(VERIFY_CONCURRENCY)
+        var emptySeen = false
+        coroutineScope {
+            todo.map { a ->
+                async {
+                    sem.withPermit {
+                        me.desidubanime.tv.data.api.BackgroundYield.waitIfPaused()
+                        if (verifyCard(a)) emptySeen = true
+                    }
+                }
+            }.awaitAll()
+        }
+        if (emptySeen) {
+            invalidateFeed()
+            runCatching { refreshFeedIfSourcesComplete(delayMs = 0L) }
+        }
+    }
+
+    /** Read every series page this card has and record what each one held. */
+    private suspend fun verifyCard(a: Anime): Boolean {
+        var empty = false
+        a.adhPostId?.let { id ->
+            val info = adhByAnimeId[a.id] ?: return@let
+            val page = runCatching { adhEpisodePage(info.episodesUrl, Network.bulk) }.getOrNull()
+            if (page != null) {
+                val n = page.episodes.count { it.links.isNotEmpty() }
+                recordProbe("adh:$id", n)
+                if (n == 0) empty = true
+            }
+        }
+        a.adPostId?.let { id ->
+            val info = adByAnimeId[a.id] ?: return@let
+            val page = runCatching { adEpisodePage(info.episodesUrl, Network.bulk) }.getOrNull()
+            if (page != null) {
+                val n = page.episodes.count { it.links.isNotEmpty() }
+                recordProbe("ad:$id", n)
+                if (n == 0) empty = true
+            }
+        }
+        a.twPostId?.let { id ->
+            val info = twByAnimeId[a.id] ?: return@let
+            val eps = runCatching { twEpisodePages(info) }.getOrDefault(emptyList())
+            val n = eps.count { it.links.isNotEmpty() }
+            recordProbe("tw:$id", n)
+            if (n == 0) empty = true
+        }
+        return empty
+    }
+
     // In-memory caches so back-navigation and re-opens render instantly.
     private data class Cached<T>(val at: Long, val value: T)
 
@@ -211,37 +351,6 @@ class AnimeRepository(
      */
     private val searchCache = LruMap<String, Cached<List<Anime>>>(SEARCH_CACHE_ENTRIES)
 
-    /** slug -> English title, learned from scraped pages; grows for the process lifetime. */
-    private val englishTitles = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    /** Set whenever a new English title is learned; cleared when flushed to disk. */
-    @Volatile
-    private var titlesDirty = false
-
-    /**
-     * English titles are cosmetic (never block rendering), so every learn goes
-     * through here and is persisted lazily on the bulk path — never in the
-     * click-time request.
-     */
-    private fun learnTitle(slug: String, title: String) {
-        if (title.isBlank()) return
-        englishTitles[slug] = title
-        titlesDirty = true
-    }
-
-    private fun learnTitles(entries: Map<String, String>) {
-        entries.forEach { (slug, title) -> learnTitle(slug, title) }
-    }
-
-    private suspend fun flushTitleLearns() {
-        val store = titleStore ?: return
-        if (!titlesDirty) return
-        // Whole map flush: the store merges, so a persistent snapshot is all
-        // we need — no per-entry bookkeeping.
-        store.putAll(HashMap(englishTitles))
-        titlesDirty = false
-    }
-
     /** animeId -> matched ADH post (positive ids = merged, negative = ADH-only). */
     private val adhByAnimeId = java.util.concurrent.ConcurrentHashMap<Int, AdhInfo>()
 
@@ -250,18 +359,6 @@ class AnimeRepository(
 
     /** animeId -> matched ToonWorld post. TW-only ids use -(postId + TW_ID_OFFSET). */
     private val twByAnimeId = java.util.concurrent.ConcurrentHashMap<Int, TwInfo>()
-
-    /**
-     * ADH postId -> desidubanime slug learned from the adhlinks page's
-     * "Watch online" link ("" = page checked, no link). Backed by [slugStore]
-     * so each post is fetched for this at most once across app restarts.
-     * AD/TW posts never enter this map — their pages carry no DDA slug.
-     */
-    private val learnedDdaSlug = java.util.concurrent.ConcurrentHashMap<Int, String>()
-
-    /** dda slug -> anime fetched by slug (outside the feed window); null = slug not on DDA. */
-    private class SlugFetch(val anime: Anime?)
-    private val fetchedBySlug = LruMap<String, SlugFetch>(100)
 
     /** adhlinks page URL -> parsed page (episode/quality/drive links + dda slug). */
     private val adhPageCache = LruMap<String, Cached<AdhEpisodePage>>(100)
@@ -349,7 +446,6 @@ class AnimeRepository(
                 // sweep it used to chain into must NOT — that was the whole
                 // cause of the cold-start stall. startBackgroundWork() picks it
                 // up if the catalog beat the feed here.
-                if (sweepsStarted) startSlugSweep(posts)
                 refreshFeedIfSourcesComplete(BADGE_REFIRE_MS)
             }
         } finally {
@@ -462,23 +558,6 @@ class AnimeRepository(
         "${l.source.name}|${l.hoster.lowercase()}|${l.quality.lowercase()}"
 
     /**
-     * Block until the persisted English-title / slug maps are in memory.
-     *
-     * MUST be awaited before any `withEnglishTitle()` on a code path that then
-     * MATCHES titles across sites. DDA's REST titles are romaji; the English
-     * names live in [englishTitles], loaded off disk asynchronously at startup.
-     * A feed load that won that race rendered romaji cards AND compared romaji
-     * against ADH/AnimeDrive's English titles, so every cross-site match failed
-     * — the user saw "Tensei shitara Slime…" with only a DDA badge, and the AD
-     * badge appeared only after a detail-open had warmed the map.
-     *
-     * Bounded: a store that never loads must not wedge the feed forever.
-     */
-    private suspend fun awaitStores() {
-        kotlinx.coroutines.withTimeoutOrNull(STORES_WAIT_MS) { storesLoaded.await() }
-    }
-
-    /**
      * Stamp every card with the sources we ACTUALLY know about.
      *
      * [adhByAnimeId] / [adByAnimeId] / [twByAnimeId] are the same maps [episodes] reads when it
@@ -513,70 +592,6 @@ class AnimeRepository(
         synchronized(feedLoadLock) { feedCache = null }
     }
 
-    @Volatile
-    private var slugSweepStarted = false
-
-    /**
-     * One-time background sweep: learn the adhlinks ddaSlug for EVERY catalog
-     * post that doesn't have one yet. The per-merge cap (MAX_SLUG_LOOKUPS)
-     * keeps feed loads fast but would take ~15 refreshes to cover the ~600
-     * post catalog — until then older anime show no hub servers and keep their
-     * romaji names. Results persist, so this costs the full catalog only once
-     * per install; later sweeps only fetch what's new.
-     *
-     * The persisted map is loaded HERE, before filtering — mergeAdh loads it
-     * lazily and can lose the race to this sweep, which would re-fetch every
-     * post's adhlinks page on EVERY cold start (the exact cause of the
-     * "clicks do nothing for ~60s after open" stall: ~600 pages hogging the
-     * shared client's per-host slots). Pages are fetched on the bulk client so
-     * they never queue ahead of click-time requests.
-     */
-    private fun startSlugSweep(posts: List<AdhInfo>) {
-        if (slugSweepStarted) return
-        slugSweepStarted = true
-        bgScope.launch {
-            storesLoaded.await()
-            // Never start ~600 page fetches in the middle of a scroll. The
-            // catalog warm already waited for quiet, but the viewer can start
-            // navigating again in the second it took to answer.
-            InteractionGate.awaitQuiet(QUIET_BEFORE_BACKGROUND_MS)
-            val missing = posts.filter { learnedDdaSlug[it.postId].isNullOrBlank() }
-            if (missing.isEmpty()) return@launch
-            // 2 at a time, and every request also parks at InteractionGate while
-            // a click is being served and at BackgroundYield during playback —
-            // this sweep has no deadline, the user does. Two pages in flight is
-            // also two Jsoup parses, which is what a 4-core TV box can absorb
-            // without making the UI thread wait its turn.
-            val sem = kotlinx.coroutines.sync.Semaphore(2)
-            val learned = java.util.concurrent.ConcurrentHashMap<Int, String>()
-            missing.map { post ->
-                launch {
-                    sem.withPermit {
-                        me.desidubanime.tv.data.api.BackgroundYield.waitIfPaused()
-                        // Breath between pages: the parser and the JSON/HTML
-                        // pipeline share cores with the renderer.
-                        kotlinx.coroutines.delay(SWEEP_PAGE_GAP_MS)
-                        val page = adhEpisodePage(post.episodesUrl, Network.bulk)
-                        if (page.episodes.isNotEmpty() || page.ddaSlug != null) {
-                            val slug = page.ddaSlug.orEmpty()
-                            learnedDdaSlug[post.postId] = slug
-                            learned[post.postId] = slug
-                        }
-                    }
-                }
-            }.joinAll()
-            if (learned.isNotEmpty()) {
-                slugStore?.putAll(learned)
-                // Next home refresh re-merges with full coverage; refresh now so
-                // the newly-learned slugs show up (HubCloud servers, English names)
-                // without the user having to navigate away and back. Debounced:
-                // the sweep runs while the viewer is using Home.
-                invalidateFeed()
-                refreshFeedIfSourcesComplete(delayMs = 1_000L)
-            }
-        }
-    }
-
     private fun <T> Cached<T>?.fresh(ttlMs: Long): T? =
         if (this != null && System.currentTimeMillis() - at < ttlMs) value else null
 
@@ -584,17 +599,16 @@ class AnimeRepository(
     private var pageCatalog: Cached<List<Anime>>? = null
 
     /**
-     * The browseable catalog: EVERY anime from either site, merged.
-     *  - ADH posts are primary; one with a known DDA match becomes a merged
-     *    card (positive DDA id -> both sites' servers on open).
-     *  - ADH posts without a match stay ADH-only (negative id, hub servers).
-     *  - DDA anime with no ADH post are appended too — DDA-only shows must
-     *    not disappear from browsing.
-     * The DDA paging runs on the bulk client (sidebar data, not click-critical).
+     * The browseable catalog: EVERY anime from the three live sites, merged.
+     *  - ADH posts are primary; each one is a card.
+     *  - AnimeDrive posts with no ADH twin become their own AD-only cards, and
+     *    ToonWorld4All posts with no twin become TW-only cards, so nothing
+     *    reachable is missing from browsing.
+     * Every source call runs on the bulk client (sidebar data, not
+     * click-critical).
      */
     private suspend fun mergedCatalog(): List<Anime> = withContext(Dispatchers.IO) {
         pageCatalog.fresh(ADH_CATALOG_TTL_MS)?.let { return@withContext it }
-        awaitStores()
         coroutineScope {
             // Sidebar data, not click-critical — everything runs on the bulk
             // lane, which yields to clicks at InteractionGate.
@@ -613,10 +627,9 @@ class AnimeRepository(
                     ).sortedByDescending { maxOf(it.updatedAt, it.publishedAt) },
                 ),
             )
-                .filter { !it.upcoming }
+                .let { pruneEmpty(it) }
             if (merged.isNotEmpty()) {
                 pageCatalog = Cached(System.currentTimeMillis(), merged)
-                runCatching { flushTitleLearns() }
             }
             merged
         }
@@ -633,10 +646,9 @@ class AnimeRepository(
         mergedCatalog().drop((page - 1) * PAGE_SIZE).take(PAGE_SIZE)
 
     /**
-     * Home sections, merged across BOTH sites — ADH is the primary source:
-     * every ADH post yields a card even when DDA is down or slow (mergeAdh
-     * turns unmatched posts into ADH-only cards with hub servers). DDA adds
-     * its identity/episode pages on top when reachable.
+     * Home sections, merged across all three live sites — ADH is the primary
+     * source: every ADH post yields a card, and AnimeDrive / ToonWorld4All
+     * posts with no ADH twin become their own cards.
      *
      * Cold start fires load() (init) and refresh() (ON_RESUME) back-to-back;
      * without the join guard below both would run a full feed fetch and
@@ -692,12 +704,9 @@ class AnimeRepository(
      * Is anything newer than the last successful build?
      *
      * Every source is asked the same question — "what is your newest stamp?" —
-     * and the answer is compared against the one the last build recorded. DDA
-     * answers it with a ONE-ITEM collection ordered exactly like its catalogs
-     * (`modified` for anime, `date` for episodes); the scraped sites answer from
-     * the latest window already in memory, so they cost no network while the
-     * catalog cache is warm. Total: two tiny requests and no catalog work,
-     * whatever the size of the catalog.
+     * and the answer is compared against the one the last build recorded. Every
+     * site answers from the latest window already in memory, so the check costs
+     * no network while the catalog cache is warm.
      *
      * Not `modified_after` / `after`. Measured against a live WordPress these
      * are silently ignored when the post type does not declare support for
@@ -768,9 +777,6 @@ class AnimeRepository(
         InteractionGate.holdFeed { fetchHomeFeedInner() }
 
     private suspend fun fetchHomeFeedInner(): HomeFeed = withContext(Dispatchers.IO) {
-        // Before ANY title mapping: romaji-vs-English comparisons are the root
-        // of the duplicate-card and wrong-badge reports. See awaitStores().
-        awaitStores()
         coroutineScope {
             // Everything here runs on the FEED lane (wpFeed / Network.feed) so a
             // feed load and a click never share a connection queue.
@@ -790,14 +796,14 @@ class AnimeRepository(
             val twPosts = twDeferred.await()
             all = withContext(mergeLane) { mergeTw(all, twPosts) }
 
-            // Recency order (ADH modified / DDA episode feed) so "All Anime"
-            // renders newest-first — ADH-first merging appends DDA-only anime
-            // at the end, which must not sink them out of the section.
+            // Recency order (each source's own modified stamp) so "All Anime"
+            // renders newest-first — ADH-first merging appends AD-only / TW-only
+            // cards at the end, which must not sink them out of the section.
             all = withContext(mergeLane) { all.sortedByDescending { maxOf(it.updatedAt, it.publishedAt) } }
 
             // Collapse near-duplicates into ONE card per anime: when matching
-            // fails, the same show arrives as separate ADH-only / AD-only / DDA
-            // cards. Runs BEFORE the recency stamping below so the fused card's
+            // fails, the same show arrives as separate ADH-only / AD-only /
+            // TW-only cards. Runs BEFORE the recency stamping below so the fused card's
             // stamps are computed from every source it absorbed.
             all = withContext(mergeLane) { collapseDuplicates(all) }
 
@@ -806,9 +812,11 @@ class AnimeRepository(
             // the upcoming-filter below, which keys off adhEpisodesUrl.
             all = withContext(mergeLane) { attachKnownSources(all) }
 
-            // Placeholder "not yet released" posts have 0 episodes. All three
-            // live sites create them, so the flag alone is the filter.
-            all = all.filter { !it.upcoming }
+            // A card must have something to play. `upcoming` is dead (nothing
+            // sets it since DesiDubAnime left), so this is proof-based instead:
+            // a card leaves only when every one of its series pages was read
+            // twice and held no episode.
+            all = pruneEmpty(all)
 
             // Recency across both sites: DDA's episode feed / modified stamp vs
             // ADH's post modified stamp (bumped when new episode links go up).
@@ -839,6 +847,11 @@ class AnimeRepository(
 
             HomeFeed(newEpisodes = newEpisodes, newReleases = newReleases, all = all)
                 .also { feedCache = Cached(System.currentTimeMillis(), it) }
+                // Prove the newest cards in the background: an announced-but-
+                // unaired season shows a normal page with zero episode links,
+                // and only that page can say so. This runs AFTER the feed is
+                // on screen, on the bulk lane, and re-merges if it finds one.
+                .also { feed -> bgScope.launch { runCatching { verifyEmptyCards(feed.all) } } }
                 // DISK WRITES ARE NOT ON THE PAINT PATH. Serialising the whole
                 // feed and the cursor before returning made Home wait for two
                 // file writes it does not need; they now run after the feed is
@@ -850,10 +863,6 @@ class AnimeRepository(
                 // already current must not look newer than its own newest post.
                 .also {
                     val cursor = FeedCursor(
-                        // Left blank for cursor-file compatibility; the two
-                        // DesiDubAnime-driven stamps they carried are gone.
-                        ddaModified = "",
-                        episodeDate = "",
                         adhModified = newestStamp(adhPosts.map { p -> p.modified }),
                         adModified = newestStamp(adPosts.map { p -> p.modified }),
                         twModified = newestStamp(twPosts.map { p -> p.modified }),
@@ -861,7 +870,6 @@ class AnimeRepository(
                     )
                     bgScope.launch {
                         runCatching { saveFeedCursor(cursor) }
-                        runCatching { flushTitleLearns() }
                     }
                 }
                 // The user is looking at a feed now — background sweeps may
@@ -942,16 +950,6 @@ class AnimeRepository(
         val byKey = HashMap<String, Anime>()
         for (a in ddaAll) for (k in Titles.keys(a.title)) byKey[k] = a
 
-        // English-name index: DDA cards are romaji, so an AnimeDrive post can
-        // only key-match them once their English name is known. Without this,
-        // every AD post whose twin is a romaji DDA card minted a lone "AD only"
-        // duplicate (the user's report) until a detail-open learned the name.
-        val byEnglishKey = HashMap<String, Anime>()
-        for (a in ddaAll) {
-            val en = englishTitles[a.slug]?.takeIf { it.isNotBlank() } ?: continue
-            for (k in Titles.keys(en)) byEnglishKey.putIfAbsent(k, a)
-        }
-
         // Fallback index for AD posts whose wording no exact key can match.
         // Keyed by season so "Season 1" of two different shows can't collide,
         // and looked up through the shared token index so it stays cheap.
@@ -979,20 +977,13 @@ class AnimeRepository(
         for (post in adPosts) {
             val keys = Titles.keys(post.displayTitle)
             val hit = keys.firstNotNullOfOrNull { byKey[it] }
-                ?: keys.firstNotNullOfOrNull { byEnglishKey[it] }
                 ?: fuzzyHit(post)
             if (hit != null) {
                 adByAnimeId[hit.id] = post
-                // Learn the English name (AD posts are English) and re-apply it:
-                // a romaji DDA card was already through withEnglishTitle() before
-                // this merge, so without the re-apply the card keeps its romaji
-                // name even though we just proved it is the same show.
-                learnTitle(hit.slug, post.displayTitle)
                 val i = merged.indexOfFirst { it.id == hit.id }
                 if (i >= 0) {
                     merged[i] = merged[i]
                         .copy(adPostId = post.postId, adEpisodesUrl = post.episodesUrl)
-                        .withEnglishTitle()
                 }
             } else {
                 // Skip if this id would collide with the TW-only tier (guard only).
@@ -1125,13 +1116,9 @@ class AnimeRepository(
             if (ra != rb) parent[rb] = ra
         }
 
-        // Compare on the LEARNED English name when we have one: a DDA card's
-        // own title is romaji, so it can never key/token-match its English
-        // ADH/AD twin — that mismatch is exactly the duplicate card the user
-        // sees, and the one that only "heals" after a detail-open learns the
-        // name. Every slug with a learned English title compares on that name;
-        // every other card keeps its own title.
-        val effective = all.map { a -> englishTitles[a.slug]?.takeIf { it.isNotBlank() } ?: a.title }
+        // Every card's own title is the comparison key: all three live sources
+        // name their posts in English, so there is no romaji alias to swap in.
+        val effective = all.map { it.title }
 
         // Tier 1: exact key.
         val firstForKey = HashMap<String, Int>()
@@ -1268,17 +1255,16 @@ class AnimeRepository(
      *
      * SPEED — two things made searches slow: every press re-asked all four
      * sites (the screen debounces, but back-navigation and the season switcher
-     * re-ran the whole thing), and the merge ran the [MAX_SLUG_LOOKUPS] HTML
-     * lane. Results are cached per normalized query for [SEARCH_TTL_MS] on a
-     * small LRU, and the merge runs the feed lane ([Network.feed]), which caps
-     * adhlinks page fetches at [FEED_SLUG_LOOKUPS].
+     * re-ran the whole thing), and every merge re-scraped pages it had already
+     * seen. Results are cached per normalized query for [SEARCH_TTL_MS] on a
+     * small LRU, and the merge runs the feed lane ([Network.feed]), which
+     * parks at InteractionGate whenever a click needs the network.
      */
     suspend fun search(query: String): List<Anime> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
         val qNorm = SearchMatch.normalize(query)
         if (qNorm.isEmpty()) return@withContext emptyList()
         searchCache[qNorm].fresh(SEARCH_TTL_MS)?.let { return@withContext it }
-        awaitStores()
         coroutineScope {
             // ADH first-class: WP search + a local scan of the cached catalog.
             val adhDeferred = async { runCatching { adh.search(query) }.getOrDefault(emptyList()) }
@@ -1332,7 +1318,7 @@ class AnimeRepository(
             // as well.
             val ranked = rankSearch(
                 collapseDuplicates(attachKnownSources(mergeTw(mergeAd(merged, adResults), twResults)))
-                    .filter { !it.upcoming },
+                    .let { pruneEmpty(it) },
                 query,
             )
             // Never cache an EMPTY answer: a site hiccup would then read as "no
@@ -1416,7 +1402,6 @@ class AnimeRepository(
     }
 
     private suspend fun animeUncached(id: Int): Anime = withContext(Dispatchers.IO) {
-        awaitStores()
         // TW-only anime (id <= -TW_ID_OFFSET) live entirely on ToonWorld4All.
         if (id <= -TW_ID_OFFSET) {
             val twPostId = -id - TW_ID_OFFSET
@@ -1520,72 +1505,31 @@ class AnimeRepository(
     }
 
     /**
-     * Find the ADH post for a DDA anime the feed merge didn't cover. ADH's WP
-     * search can't find romaji titles ("Tian Guan Ci Fu" -> 0 results for an
-     * English-titled post), so the catalog + learned adhlinks slugs are
-     * checked FIRST — the slug link is definitive. English search remains as
-     * the fallback for anime whose English name we do know.
+     * Find the AnimeDubHindi post for a card the feed built without one (an
+     * AnimeDrive-only or ToonWorld4All-only card).
+     *
+     * The catalog runs FIRST and the site's own search second: ADH's WP search
+     * matches the post BODY, so a title that does not appear verbatim in a
+     * synopsis comes back empty even when the post sits in the catalog. Both
+     * paths are confirmed by title keys / tokens / season, so a content-only
+     * search hit cannot attach the wrong show.
      */
     private suspend fun findAdhFor(a: Anime): AdhInfo? = withContext(Dispatchers.IO) {
-        // 1) Any already-learned slug pointing at this anime?
         val catalog = adhCatalog?.value ?: runCatching { adhPostsForMerge() }.getOrDefault(emptyList())
-        catalog.firstOrNull { learnedDdaSlug[it.postId] == a.slug }
-            ?.let { return@withContext it }
+        val (englishBase, season) = Titles.baseAndSeason(a.title)
+        val myKeys = Titles.keys(a.title)
+        val myTokens = Titles.baseTokens(a.title)
 
-        // Both sides are English-titled now: AnimeDubHindi names its posts in
-        // English, so the old "scrape the English name off the DDA page first"
-        // step went with the site.
-        val self = a
-        val (englishBase, season) = Titles.baseAndSeason(self.title)
-        val myKeys = Titles.keys(self.title)
+        fun matches(post: AdhInfo): Boolean {
+            if (Titles.keys(post.displayTitle).any { it in myKeys }) return true
+            if (Titles.baseAndSeason(Titles.clean(post.displayTitle)).second != season) return false
+            return Titles.sameShow(myTokens, Titles.baseTokens(post.displayTitle))
+        }
 
-        // 2) Title-key match against the full catalog (works once the DDA side
-        //    carries its English name).
-        catalog.firstOrNull { post -> Titles.keys(post.displayTitle).any { it in myKeys } }
-            ?.let { return@withContext it }
-
-        // 3) Candidates to CONFIRM via their adhlinks page (fetched once,
-        //    persisted). English search ALWAYS runs alongside the related-name
-        //    filter — gating it behind ifEmpty broke on false positives (slug
-        //    word "dou" in tsu-ga-mic-ise-dou matched "BAKI-DOU", which then
-        //    shadowed the real Tsukimichi post the search would have found).
-        //    Posts whose learned slug is BLANK are retried too — "" may be a
-        //    stale miss from an old parser and used to poison the post forever.
-        val unlearned = catalog.filter { learnedDdaSlug[it.postId].isNullOrBlank() }
-        val byName = unlearned
-            .filter { Titles.related(it.titleBase, self.title) || Titles.related(it.titleBase, a.slug.replace('-', ' ')) }
-            .take(5)
-        val bySearch = runCatching { adh.search(Titles.searchQuery(englishBase)) }
+        catalog.firstOrNull(::matches)?.let { return@withContext it }
+        runCatching { adh.search(Titles.searchQuery(englishBase)) }
             .getOrDefault(emptyList())
-            .take(5)
-        val candidates = (bySearch + byName)
-            .distinctBy { it.postId }
-            .sortedBy { if (it.season == season) 0 else 1 }
-            .ifEmpty { unlearned.take(8) } // catalog is modified-desc: newest first
-        // Fetch every unresolved candidate's adhlinks page IN PARALLEL (bulk
-        // client, 3-per-host): the sequential loop turned one detail-open into
-        // up to 8 back-to-back HTML round-trips — the worst of the cold-start
-        // "clicks respond late" stalls. A blank "" slug is a stale miss and is
-        // retried here too.
-        val needFetch = candidates.filter { learnedDdaSlug[it.postId].isNullOrBlank() }
-        // On the SHARED client (parallel, cached after first fetch): this runs
-        // on the detail-open critical path and must not queue behind the
-        // cold-start sweep flood on the bulk lane.
-        needFetch.map { post ->
-            post to async { adhEpisodePage(post.episodesUrl) }
-        }.forEach { (post, deferred) ->
-            val page = deferred.await()
-            if (page.episodes.isNotEmpty() || page.ddaSlug != null) {
-                val slug = page.ddaSlug.orEmpty()
-                learnedDdaSlug[post.postId] = slug
-                slugStore?.putAll(mapOf(post.postId to slug))
-            }
-        }
-        for (post in candidates) {
-            val slug = learnedDdaSlug[post.postId]?.takeIf { it.isNotBlank() }
-            if (slug == a.slug) return@withContext post
-        }
-        null
+            .firstOrNull(::matches)
     }
 
     /**
@@ -1614,7 +1558,6 @@ class AnimeRepository(
                         numberInt = h.number,
                         title = "",
                         thumbnail = "",
-                        watchUrl = "",
                         hubLinks = h.links.filter { it.hoster in STREAMABLE_HOSTERS },
                     )
                 }.filter { it.hubLinks.isNotEmpty() }.sortedBy { it.numberInt }.also {
@@ -1634,7 +1577,6 @@ class AnimeRepository(
                         numberInt = h.number,
                         title = "",
                         thumbnail = "",
-                        watchUrl = "",
                         hubLinks = h.links.filter { it.hoster in STREAMABLE_HOSTERS },
                     )
                 }.filter { it.hubLinks.isNotEmpty() }.sortedBy { it.numberInt }.also {
@@ -1745,6 +1687,10 @@ class AnimeRepository(
                 }.filter { it.links.isNotEmpty() }
 
             // Debug: Log what was collected
+            adhInfo?.let { recordProbe("adh:${it.postId}", hub.size) }
+            adInfo?.let { recordProbe("ad:${it.postId}", adHub.size) }
+            twInfo?.let { recordProbe("tw:${it.postId}", twHub.size) }
+
             if (hub.isNotEmpty()) {
                 me.desidubanime.tv.data.DebugLog.log("episodes", "ADH: ${hub.size} episodes (${hub.map { it.number }.joinToString(",")})")
             }
@@ -1795,7 +1741,6 @@ class AnimeRepository(
                     numberInt = num,
                     title = "",
                     thumbnail = "",
-                    watchUrl = "",
                     hubLinks = links,
                 )
             }
@@ -1817,7 +1762,7 @@ class AnimeRepository(
         val page = adh.episodePage(url, client)
         // Cache only parsed pages; a Cloudflare hiccup shouldn't stick as
         // "no hub links" until the TTL runs out.
-        if (page.episodes.isNotEmpty() || page.ddaSlug != null) {
+        if (page.episodes.isNotEmpty()) {
             adhPageCache[url] = Cached(System.currentTimeMillis(), page)
         }
         return page
@@ -1883,7 +1828,6 @@ class AnimeRepository(
      * existing TW-only paths (pure TW episodes + TW servers).
      */
     suspend fun twOnlyAnime(): List<Anime> = withContext(Dispatchers.IO) {
-        awaitStores()
         val posts = twCatalog?.value
             ?: runCatching { tw.latestPosts(perPage = 100, client = Network.bulk) }.getOrDefault(emptyList())
         posts.sortedByDescending { it.modified }
@@ -1905,54 +1849,11 @@ class AnimeRepository(
 
     // ---- mappers ----
 
-    /**
-     * Swap the romaji title for the site's English one when we know it.
-     * Season must survive the swap: if the romaji name carries a season marker
-     * ("Season 2", "2nd Season", trailing "2") and the English one doesn't,
-     * append it.
-     */
-    private fun Anime.withEnglishTitle(): Anime {
-        val en = englishTitles[slug] ?: return this
-        if (en.equals(title, ignoreCase = true)) return this
-        val season = Titles.seasonOf(title)
-        val finalTitle =
-            if (season != null && Titles.seasonOf(en) == null) "$en Season $season" else en
-        return copy(title = finalTitle)
-    }
-
     /** Strip HTML tags/entities that WordPress rendered fields carry. */
     private fun clean(html: String): String =
         Parser.unescapeEntities(html.replace(Regex("<[^>]*>"), " "), false)
             .replace(Regex("\\s+"), " ")
             .trim()
-
-    /**
-     * Load the persisted slug/title maps — pure disk reads, no network. They
-     * make a cold start's first merge as good as the last session's, and must
-     * be in memory BEFORE the first feed merges (a late slug-store load used to
-     * re-fetch every adhlinks page on every launch).
-     *
-     * LAST in the class on purpose: init blocks run in declaration order, and
-     * this coroutine touches maps declared throughout the body. Started from
-     * higher up, it could read a still-null field from its IO thread.
-     */
-    init {
-        bgScope.launch {
-            runCatching {
-                slugStore?.load()?.forEach { (k, v) -> learnedDdaSlug.putIfAbsent(k, v) }
-            }
-            val loaded = runCatching { titleStore?.load() }
-                .getOrDefault(emptyMap()) ?: emptyMap()
-            loaded.forEach { (k, v) -> englishTitles.putIfAbsent(k, v) }
-            titlesDirty = false
-            storesLoaded.complete(Unit)
-        }
-        // Catalog warm is DEFERRED to startBackgroundWork() — it fires AFTER
-        // the first feed has loaded and the user has had a chance to interact.
-        // Starting it here competed with the feed at cold start (the sweepers
-        // and catalogs all hit the same hosts and queues before the user's
-        // first click could get a word in).
-    }
 
     private companion object {
         const val NEW_RELEASES_COUNT = 12
@@ -1964,10 +1865,15 @@ class AnimeRepository(
         /** Search answers kept per normalized query; back-nav and seasons() reuse them. */
         const val SEARCH_TTL_MS = 3 * 60_000L
         const val SEARCH_CACHE_ENTRIES = 12
+        /** How long a page's episode count is trusted before it is re-read. */
+        const val PROBE_TTL_MS = 12 * 60 * 60_000L
+        /** Consecutive empty reads before a card is declared unplayable. */
+        const val ZERO_STRIKES = 2
+        /** Pages verified per feed build (the newest cards only). */
+        const val VERIFY_CARDS_PER_BUILD = 10
+        /** ...of which this many are in flight at once. */
+        const val VERIFY_CONCURRENCY = 2
         const val EPISODES_TTL_MS = 2 * 60_000L    // new episodes should show up quickly
-        const val MAX_SLUG_LOOKUPS = 20            // adhlinks/slug fetches per merge (learned once per post, persisted)
-        /** Feed-lane cap: the sweep finishes the rest off the critical path. */
-        const val FEED_SLUG_LOOKUPS = 6
         const val FEED_LOOKUP_PARALLELISM = 4      // ...of which this many run at once (scrapers use sync execute(), which Dispatcher doesn't throttle)
         /** Settle window before a background catalog/sweep result re-merges the feed. */
         const val RE_MERGE_DEBOUNCE_MS = 6_000L
@@ -1984,12 +1890,7 @@ class AnimeRepository(
         const val BACKGROUND_SETTLE_MS = 10_000L
         /** Idle window required before a background job may begin. */
         const val QUIET_BEFORE_BACKGROUND_MS = 2_000L
-        /** Below this many learned names, the title listings stay on the feed path. */
-        /** Last of the three jobs: names already render, so this can wait. */
-        /** Breath between sweep pages so parses do not own every core. */
-        const val SWEEP_PAGE_GAP_MS = 250L
         const val TOKEN_BUCKET_LIMIT = 60          // words shared by more cards than this carry no signal for dedup
-        const val STORES_WAIT_MS = 4_000L          // cap on waiting for the persisted title/slug maps
         const val AD_ID_OFFSET = 1_000_000         // AD-only ids: -(postId + offset), keeps them distinct from ADH-only (-postId)
         const val TW_ID_OFFSET = 2_000_000         // TW-only ids: -(postId + offset), keeps them distinct from ADH-only (-postId) and AD-only
 
@@ -2003,7 +1904,7 @@ class AnimeRepository(
         const val MAX_HUB_EPISODE_NUMBER = 2999
 
         /** How long badges wait for ALL source catalogs before releasing anyway. */
-        const val SOURCES_BADGE_GRACE_MS = 60_000L
+        const val SOURCES_BADGE_GRACE_MS = 8_000L
         /**
          * Settle window before a catalogue landing re-merges the feed. Much
          * shorter than [RE_MERGE_DEBOUNCE_MS]: this merge exists to complete the

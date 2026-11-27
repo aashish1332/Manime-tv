@@ -128,13 +128,6 @@ class AdhScraper(private val settings: AppSettings) {
             return AdhEpisodePage(emptyList())
         }
 
-        // There is no cross-site slug to learn any more: the adhlinks page's
-        // "Watch online" anchor pointed at desidubanime.me, which now answers
-        // every request with a Cloudflare challenge. The field stays on the
-        // return type (AnimeDrive and ToonWorld share the shape) and is always
-        // null.
-        val ddaSlug: String? = null
-
         // STRICT episode matcher. The old pattern allowed a bare "E", which
         // matched inside words: "480P x264 [Size: 69mb]" matched "e: 69" and
         // turned the FILE SIZE into the current episode number â€” real episodes
@@ -202,7 +195,7 @@ class AdhScraper(private val settings: AppSettings) {
         }
         // Debug: Log what was found
         me.desidubanime.tv.data.DebugLog.log("ADH-scrape", "Found ${episodes.size} episodes with links from ${url.substringAfterLast("/")}")
-        return AdhEpisodePage(episodes = episodes.sortedBy { it.number }, ddaSlug = ddaSlug)
+        return AdhEpisodePage(episodes = episodes.sortedBy { it.number })
     }
 
     /** One link per (quality, hoster) pair, highest resolution first, HubCloud before others. */
