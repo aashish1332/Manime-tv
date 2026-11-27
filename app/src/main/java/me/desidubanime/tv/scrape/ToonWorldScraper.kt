@@ -146,7 +146,11 @@ class ToonWorldScraper(private val settings: AppSettings) {
         val html = try {
             get(client, url)
         } catch (e: Exception) {
-            return TwEpisodePage(emptyList())
+            return TwEpisodePage(emptyList(), ok = false)
+        }
+        if (AdPageBrowser.looksLikeChallenge(html)) {
+            DebugLog.log("T4A-scrape", "episode page is a challenge page - unknown, not empty")
+            return TwEpisodePage(emptyList(), ok = false)
         }
 
         val sxe = Regex("""-(\d+)x(\d+)(?:[/?#].*)?$""").find(url.substringBefore('#'))
@@ -174,7 +178,10 @@ class ToonWorldScraper(private val settings: AppSettings) {
                 DebugLog.log("T4A-scrape", "ep $singleNumber: ${fromDom.first().links.size} links (DOM fallback)")
                 return TwEpisodePage(episodes = fromDom)
             }
-            return TwEpisodePage(emptyList())
+            // __PROPS__ present means the real page and its encodes list is
+            // authoritative: it genuinely holds no episode. Without it we
+            // cannot tell a re-skin from an empty season, so say "unknown".
+            return TwEpisodePage(emptyList(), ok = hasProps)
         }
 
         // ---- legacy combined listing: document-order walk ----

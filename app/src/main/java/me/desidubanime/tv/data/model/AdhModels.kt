@@ -68,4 +68,11 @@ data class HubEpisode(
 /** Everything parsed from an adhlinks episode page. */
 data class AdhEpisodePage(
     val episodes: List<HubEpisode>,
+    /**
+     * True when the page was really fetched and parsed. FALSE means "unknown"
+     * (Cloudflare challenge, timeout, non-2xx): the page may well have
+     * episodes, so it must never be remembered as an empty one — that is how
+     * a gated link.animedrive.in would hide a real AnimeDrive-only title.
+     */
+    val ok: Boolean = true,
 )

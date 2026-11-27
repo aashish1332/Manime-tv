@@ -122,11 +122,18 @@ class AdhScraper(private val settings: AppSettings) {
      * [Network.bulk] so its thousands of pages stay off the fast queue.
      */
     fun episodePage(url: String, client: OkHttpClient = Network.client): AdhEpisodePage {
-        val doc = try {
-            Jsoup.parse(get(client, url), url)
+        val html = try {
+            get(client, url)
         } catch (e: Exception) {
-            return AdhEpisodePage(emptyList())
+            return AdhEpisodePage(emptyList(), ok = false)
         }
+        // An interstitial is not an empty season. Reporting it as one would let
+        // the empty-card pruner hide a title that is simply unreachable today.
+        if (AdPageBrowser.looksLikeChallenge(html)) {
+            me.desidubanime.tv.data.DebugLog.log("ADH-scrape", "episode page is a challenge page - unknown, not empty")
+            return AdhEpisodePage(emptyList(), ok = false)
+        }
+        val doc = Jsoup.parse(html, url)
 
         // STRICT episode matcher. The old pattern allowed a bare "E", which
         // matched inside words: "480P x264 [Size: 69mb]" matched "e: 69" and

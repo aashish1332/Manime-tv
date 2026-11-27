@@ -1578,3 +1578,39 @@ CHECKS
 NOT VERIFIED: no adb/TV here, so nothing visual was watched and the probe
 timing on a real box is unknown. The tag/empty-card behaviour is compiled and
 built, not observed on a television.
+
+================================================================
+M. v1.2.9 — "EMPTY" NOW MEANS PROVEN EMPTY
+================================================================
+
+THE HOLE: an empty parse and an unreadable page were the same value.
+AdhScraper, AnimeDriveScraper and ToonWorldScraper all returned an empty
+episode list for a Cloudflare challenge, a timeout and a genuinely empty
+series page alike. The probe store therefore recorded "0 episodes" for a
+gated link.animedrive.in page — which would have hidden a real AnimeDrive-only
+anime on any day the CDN challenged the app's requests.
+
+WHAT CHANGED
+- AdhEpisodePage and TwEpisodePage carry `ok`. It is FALSE for: a failed
+  fetch (exception), a Cloudflare interstitial (AdPageBrowser.looksLikeChallenge),
+  and a T4A page whose __PROPS__ was missing (a re-skin cannot be told from an
+  empty season). AD's gated page is now reported before parsing, so the
+  "still gated after the browser attempt" log line is what feeds the value.
+- `recordProbe(key, count, ok)` writes NOTHING when ok is false. A challenge
+  can no longer create, refresh or age a probe: the card simply stays, which
+  is the correct outcome for "we could not read it".
+- A genuine zero is conclusive on arrival (stored with the ZERO_STRIKES
+  marker), so a provably empty card leaves on the SAME refresh: the verifier
+  records it, invalidates the feed and re-merges once, and pruneEmpty drops it
+  in that pass. No second look required.
+- Detail opens record the ADH/AD counts only when the page they awaited was
+  ok. ToonWorld is one page per episode, so its proof comes from the verifier's
+  twProbe(), which returns ok=false if ANY page could not be read.
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS - 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL
+NOT VERIFIED: no adb/TV. Whether link.animedrive.in answers the challenge on a
+given day cannot be reproduced here either, so the "gated page never prunes"
+path is reasoned and compiled, not observed.

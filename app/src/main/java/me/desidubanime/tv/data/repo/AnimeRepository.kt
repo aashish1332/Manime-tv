@@ -194,25 +194,24 @@ class AnimeRepository(
     }
 
     /**
-     * Remember what a series page held.
+     * Remember what a series page held — ONLY when the read was genuine.
      *
-     * A POSITIVE answer is definitive and resets the strike count. A zero is
-     * one strike: the same page is parsed twice before a card is declared
-     * empty, because an empty parse is also what a dropped connection looks
-     * like, and hiding a real anime is far worse than showing an empty one for
-     * one more refresh. Two independent looks, then it goes.
+     * An unreadable page proves nothing: a Cloudflare challenge, a timeout and
+     * a real "no episodes yet" all parse to an empty list, and only the
+     * caller's [ok] can tell them apart. Recording the first two would hide a
+     * real AnimeDrive-only anime on a day the CDN felt like challenging
+     * everyone, which is exactly what must never happen.
+     *
+     * A genuine zero IS the proof, so it is stored conclusive: the card leaves
+     * on the same refresh instead of waiting for a second look.
      */
-    private fun recordProbe(key: String, count: Int) {
-        val prev = episodeProbes[key]
+    private fun recordProbe(key: String, count: Int, ok: Boolean) {
+        if (!ok) return
         val now = System.currentTimeMillis()
         val next = if (count > 0) {
             ProbeEntry(count = count, at = now, zeros = 0)
         } else {
-            ProbeEntry(
-                count = 0,
-                at = now,
-                zeros = if (prev != null && prev.count > 0) 1 else (prev?.zeros ?: 0) + 1,
-            )
+            ProbeEntry(count = 0, at = now, zeros = ZERO_STRIKES)
         }
         episodeProbes[key] = next
         bgScope.launch { runCatching { probeStore?.put(mapOf(key to next)) } }
@@ -221,10 +220,12 @@ class AnimeRepository(
     /**
      * Keep a card only while at least one of its sites is not proven empty.
      *
-     * "Unproven" always keeps the card: this filter exists to remove titles
-     * that provably have nothing to play, never to hide things it is unsure
-     * about. A fresh zero for ONE source with another source live keeps it —
-     * that is exactly the "announced on AnimeDrive, already airing on ADH" case.
+     * "Unproven" always keeps the card: this filter removes titles that
+     * provably have nothing to play, never things it is unsure about. A probe
+     * is written ONLY after a genuine read ([recordProbe]), so a Cloudflare
+     * challenge or a timeout can never reach this filter. One live source
+     * keeps the card — the "announced on AnimeDrive, already airing on ADH"
+     * case.
      */
     private fun pruneEmpty(list: List<Anime>): List<Anime> {
         val now = System.currentTimeMillis()
@@ -285,29 +286,52 @@ class AnimeRepository(
         a.adhPostId?.let { id ->
             val info = adhByAnimeId[a.id] ?: return@let
             val page = runCatching { adhEpisodePage(info.episodesUrl, Network.bulk) }.getOrNull()
-            if (page != null) {
+            if (page != null && page.ok) {
                 val n = page.episodes.count { it.links.isNotEmpty() }
-                recordProbe("adh:$id", n)
+                recordProbe("adh:$id", n, ok = true)
                 if (n == 0) empty = true
             }
         }
         a.adPostId?.let { id ->
             val info = adByAnimeId[a.id] ?: return@let
             val page = runCatching { adEpisodePage(info.episodesUrl, Network.bulk) }.getOrNull()
-            if (page != null) {
+            if (page != null && page.ok) {
                 val n = page.episodes.count { it.links.isNotEmpty() }
-                recordProbe("ad:$id", n)
+                recordProbe("ad:$id", n, ok = true)
                 if (n == 0) empty = true
             }
         }
         a.twPostId?.let { id ->
             val info = twByAnimeId[a.id] ?: return@let
-            val eps = runCatching { twEpisodePages(info) }.getOrDefault(emptyList())
-            val n = eps.count { it.links.isNotEmpty() }
-            recordProbe("tw:$id", n)
-            if (n == 0) empty = true
+            val (n, ok) = twProbe(info)
+            if (ok) {
+                recordProbe("tw:$id", n, ok = true)
+                if (n == 0) empty = true
+            }
         }
         return empty
+    }
+
+    /**
+     * Read a ToonWorld4All series until one page proves an episode exists.
+     *
+     * Returns (count, ok); ok = FALSE when ANY page could not be read, because
+     * an unreadable page is not an empty season. TW serves one page per
+     * episode, so the walk stops at the first page that has links.
+     */
+    private suspend fun twProbe(info: TwInfo): Pair<Int, Boolean> {
+        val urls = info.episodeUrls.values.filter { it.isNotBlank() }.distinct()
+            .ifEmpty {
+                info.episodesUrl.takeIf { it.isNotBlank() }?.let { listOf(it) } ?: emptyList()
+            }
+        if (urls.isEmpty()) return 0 to true
+        for (u in urls) {
+            val page = runCatching { twEpisodePage(u) }.getOrNull()
+            if (page == null || !page.ok) return 0 to false
+            val n = page.episodes.count { it.links.isNotEmpty() }
+            if (n > 0) return n to true
+        }
+        return 0 to true
     }
 
     // In-memory caches so back-navigation and re-opens render instantly.
@@ -1661,7 +1685,8 @@ class AnimeRepository(
             // ToonWorld4All gets the same on-demand treatment.
             // (Moved ABOVE the awaits — see the ADH block comment.)
 
-            val hub = hubDeferred?.await()?.episodes.orEmpty()
+            val adhPage = hubDeferred?.await()
+            val hub = adhPage?.episodes.orEmpty()
                 .filter { it.number in 1..MAX_HUB_EPISODE_NUMBER }
                 .map { ep ->
                     HubEpisode(
@@ -1669,7 +1694,8 @@ class AnimeRepository(
                         links = ep.links.filter { it.hoster in STREAMABLE_HOSTERS },
                     )
                 }.filter { it.links.isNotEmpty() }
-            val adHub = adHubDeferred?.await()?.episodes.orEmpty()
+            val adPage = adHubDeferred?.await()
+            val adHub = adPage?.episodes.orEmpty()
                 .filter { it.number in 1..MAX_HUB_EPISODE_NUMBER }
                 .map { ep ->
                     HubEpisode(
@@ -1687,9 +1713,11 @@ class AnimeRepository(
                 }.filter { it.links.isNotEmpty() }
 
             // Debug: Log what was collected
-            adhInfo?.let { recordProbe("adh:${it.postId}", hub.size) }
-            adInfo?.let { recordProbe("ad:${it.postId}", adHub.size) }
-            twInfo?.let { recordProbe("tw:${it.postId}", twHub.size) }
+            adhInfo?.let { recordProbe("adh:${it.postId}", hub.size, adhPage?.ok == true) }
+            adInfo?.let { recordProbe("ad:${it.postId}", adHub.size, adPage?.ok == true) }
+            // TW is one page per episode; the merged list cannot say whether a
+            // short list came from a parse failure, so its proof comes from the
+            // background verifier ([twProbe]) alone.
 
             if (hub.isNotEmpty()) {
                 me.desidubanime.tv.data.DebugLog.log("episodes", "ADH: ${hub.size} episodes (${hub.map { it.number }.joinToString(",")})")
@@ -1867,7 +1895,7 @@ class AnimeRepository(
         const val SEARCH_CACHE_ENTRIES = 12
         /** How long a page's episode count is trusted before it is re-read. */
         const val PROBE_TTL_MS = 12 * 60 * 60_000L
-        /** Consecutive empty reads before a card is declared unplayable. */
+        /** Marker stored with a PROVEN empty page (never a failed fetch). */
         const val ZERO_STRIKES = 2
         /** Pages verified per feed build (the newest cards only). */
         const val VERIFY_CARDS_PER_BUILD = 10

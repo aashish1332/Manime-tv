@@ -49,6 +49,8 @@ data class TwInfo(
 /** All hubcloud links for one episode, parsed from the toonworld episode page. */
 data class TwEpisodePage(
     val episodes: List<TwEpisode>,
+    /** See [me.desidubanime.tv.data.model.AdhEpisodePage.ok] — false = unknown. */
+    val ok: Boolean = true,
 )
 
 /** One episode with its quality links. */

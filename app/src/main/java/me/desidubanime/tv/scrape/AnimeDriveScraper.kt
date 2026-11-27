@@ -164,7 +164,17 @@ class AnimeDriveScraper(private val settings: AppSettings) {
                 )
             }
         }
-        val html = body ?: return AdhEpisodePage(emptyList())
+        val html = body ?: return AdhEpisodePage(emptyList(), ok = false)
+        // link.animedrive.in answers Cloudflare's challenge to plain HTTP on a
+        // regular basis. That page is not an empty series page, so it must be
+        // reported as UNKNOWN and never recorded as "no episodes".
+        if (AdPageBrowser.looksLikeChallenge(html)) {
+            me.desidubanime.tv.data.DebugLog.log(
+                "AD-scrape",
+                "episode page still gated after the browser attempt - unknown, not empty",
+            )
+            return AdhEpisodePage(emptyList(), ok = false)
+        }
         val doc = Jsoup.parse(html, url)
 
         // STRICT episode matcher â€” see AdhScraper: a loose bare-"E" pattern
