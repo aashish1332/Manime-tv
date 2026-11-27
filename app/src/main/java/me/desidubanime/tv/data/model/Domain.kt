@@ -3,7 +3,7 @@ package me.desidubanime.tv.data.model
 /** Clean domain models used by the UI layer (decoded / normalised). */
 
 data class Anime(
-    val id: Int,                     // DDA post id; ADH-only anime use -adhPostId
+    val id: Int,                     // >0 unused now; ADH cards use -adhPostId
     val slug: String,
     val title: String,
     val synopsis: String,
@@ -38,7 +38,6 @@ data class Anime(
     val sourcesResolved: Boolean = false,
 ) {
     /** Which sources have this anime — for source badges on cards. */
-    val hasDda: Boolean get() = id > 0
     val hasAdh: Boolean get() = adhPostId != null
     val hasAd: Boolean get() = adPostId != null
     val hasTw: Boolean get() = twPostId != null

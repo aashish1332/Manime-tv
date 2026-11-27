@@ -477,53 +477,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 sourceLabel = link.source.label,
             )
         }
-        if (ep.watchUrl.isBlank()) {
-            // ADH/AD/TW-only episode: no DDA servers exist, but the hub
-            // options MUST still go through the priority sort below â€”
-            // returning them raw put TW after AD in the menu (the raw list is
-            // merged in ADHâ†’ADâ†’TW order, not source-priority order).
-            return@coroutineScope hubOptions.sortedWith(OPTION_ORDER)
-        }
-
-        val servers: List<Server> = repo.servers(ep.watchUrl)
-        val dda = servers.map { s ->
-            async {
-                when {
-                    s.isCloud -> {
-                        val subs = try {
-                            repo.cloudSubServers(s.embedUrl)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (t: Throwable) {
-                            emptyList()
-                        }
-                        if (subs.isEmpty()) {
-                            listOf(PlayOption(s.name, s.group, s.embedUrl, native = true))
-                        } else {
-                            subs.map { sub -> PlayOption("${s.name} - ${sub.name}", s.group, sub.playUrl, native = true) }
-                        }
-                    }
-                    s.isMirror -> {
-                        val subs = try {
-                            repo.mirrorSubServers(s.embedUrl)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (t: Throwable) {
-                            emptyList()
-                        }
-                        if (subs.isEmpty()) {
-                            listOf(PlayOption(s.name, s.group, s.embedUrl, native = false))
-                        } else {
-                            subs.map { sub -> PlayOption("${s.name} - ${sub.name}", s.group, sub.playUrl, native = false) }
-                        }
-                    }
-                    else -> listOf(PlayOption(s.name, s.group, s.embedUrl, native = false))
-                }
-            }
-        }.awaitAll().flatten()
-        // Hub options first in the visible server list â€” SAME priority as the
-        // auto-resolver: ADH -> TW -> AD -> DDA.
-        (hubOptions + dda).sortedWith(OPTION_ORDER)
+        // ONE PATH NOW: every episode is hub-link only. DesiDubAnime's own
+        // "servers" (CLOUD/mirror embeds that needed a WebView) came from a
+        // site that answers Cloudflare's challenge to every request, so that
+        // branch could only ever add rows that could not play.
+        hubOptions.sortedWith(OPTION_ORDER)
     }
 
     /** Shared comparator: source tier, then HubCloud-first, native-first, SUB-first. */

@@ -22,7 +22,6 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
 class AppSettings(private val context: Context) {
 
     private val adhKey = stringPreferencesKey("adh_base_url")
-    private val ddaKey = stringPreferencesKey("dda_base_url")
     private val adKey = stringPreferencesKey("ad_base_url")
     private val twKey = stringPreferencesKey("tw_base_url")
     private val showPlayerLogsKey = booleanPreferencesKey("show_player_logs")
@@ -40,19 +39,6 @@ class AppSettings(private val context: Context) {
         context.settingsDataStore.edit { prefs ->
             val normalized = normalize(raw)
             if (normalized.isBlank()) prefs.remove(adhKey) else prefs[adhKey] = normalized
-        }
-    }
-
-    val ddaBaseUrl: Flow<String> = context.settingsDataStore.data.map { prefs ->
-        prefs[ddaKey]?.takeIf { it.isNotBlank() } ?: me.desidubanime.tv.data.api.Api.DEFAULT_HOST
-    }
-
-    suspend fun ddaBase(): String = ddaBaseUrl.first()
-
-    suspend fun setDdaBaseUrl(raw: String) {
-        context.settingsDataStore.edit { prefs ->
-            val normalized = normalize(raw)
-            if (normalized.isBlank()) prefs.remove(ddaKey) else prefs[ddaKey] = normalized
         }
     }
 

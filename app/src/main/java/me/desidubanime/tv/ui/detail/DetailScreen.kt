@@ -146,6 +146,9 @@ private fun DetailContent(
         items(
             count = data.episodes.size,
             key = { data.episodes[it].id },
+            // Every cell here is the same shape, so Compose can reuse slots
+            // instead of rebuilding them while the grid scrolls on D-pad.
+            contentType = { "episode-card" },
         ) { index ->
             val isRowEnd = index % EPISODE_COLUMNS == EPISODE_COLUMNS - 1 || index == data.episodes.lastIndex
             val isRowStart = index % EPISODE_COLUMNS == 0
@@ -230,7 +233,6 @@ private fun InfoHeader(
                 .data(data.anime.posterUrl.ifBlank { null })
                 .size(360, 500)                  // detail poster: ~180dp x 250dp @2x
                 .addHeader("User-Agent", Api.USER_AGENT)
-                .addHeader("Referer", Api.REFERER)
                 .build(),
             contentDescription = data.anime.title,
             contentScale = ContentScale.Crop,
@@ -247,7 +249,6 @@ private fun InfoHeader(
                         "ADH".takeIf { data.anime.hasAdh },
                         "AD".takeIf { data.anime.hasAd },
                         "T4A".takeIf { data.anime.hasTw },
-                        "DDA".takeIf { data.anime.hasDda },
                     )
                     if (sources.isNotEmpty()) append("  ·  " + sources.joinToString(" · "))
                 },
@@ -302,8 +303,7 @@ private fun EpisodeCard(
                     .data(episode.thumbnail.ifBlank { fallbackPoster.ifBlank { null } })
                     .size(320, 192)              // episode card: full width of card x 96dp @2x
                     .addHeader("User-Agent", Api.USER_AGENT)
-                    .addHeader("Referer", Api.REFERER)
-                    .build(),
+                        .build(),
                 contentDescription = episode.number,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

@@ -84,7 +84,6 @@ fun AnimeCard(
                         .data(anime.posterUrl)
                         .size(300, 450)                  // 2:3 poster — downsample at decode time
                         .addHeader("User-Agent", Api.USER_AGENT)
-                        .addHeader("Referer", Api.REFERER)
                         // removed crossfade for smoother scrolling
                         .build(),
                     contentDescription = anime.title,
@@ -163,7 +162,6 @@ fun SourceBadges(anime: Anime, modifier: Modifier = Modifier) {
             if (anime.hasAdh) add("ADH" to Color(0xFF2196F3))   // blue
             if (anime.hasAd) add("AD" to Color(0xFF4CAF50))     // green
             if (anime.hasTw) add("T4A" to Color(0xFF9C27B0))   // purple
-            if (anime.hasDda) add("DDA" to Color(0xFFFF9800))   // orange
         }
     }
     if (badges.isEmpty()) return

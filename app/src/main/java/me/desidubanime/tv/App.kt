@@ -34,12 +34,20 @@ class App : Application(), ImageLoaderFactory {
         me.desidubanime.tv.data.ServiceLocator.appScope.launch {
             runCatching { me.desidubanime.tv.data.ServiceLocator.seenStore.firstRunAt() }
         }
+        // ANIMEDRIVE'S EPISODE PAGES NEED A BROWSER, AND THE DETAIL SCREEN
+        // NEEDS THEM BEFORE THE PLAYER EXISTS.
+        //
+        // link.animedrive.in answers every plain HTTP client with a Cloudflare
+        // managed challenge (`403 cf-mitigated: challenge`, measured on OkHttp,
+        // curl and requests alike), so the only way to read an episode page is
+        // the WebView bridge. That bridge used to be installed by the PLAYER's
+        // ViewModel — i.e. AFTER the screen that builds the episode list had
+        // already run. The detail screen therefore got an empty AD episode page
+        // and AnimeDrive contributed no servers at all, which is exactly the
+        // "card shows ADH + AD + T4A, but the player only offered ADH" report.
+        // Installing it here means every scrape in the process can use it.
+        me.desidubanime.tv.scrape.AdPageBrowser.install { url -> adBrowser.html(url, AD_PAGE_MS) }
         me.desidubanime.tv.data.ServiceLocator.appScope.launch {
-            runCatching {
-                me.desidubanime.tv.data.api.Api.setHost(
-                    me.desidubanime.tv.data.ServiceLocator.settings.ddaBase(),
-                )
-            }
             runCatching { me.desidubanime.tv.data.ServiceLocator.repository.homeFeed() }
         }
         // Self-update check, deliberately a few seconds BEHIND the feed: the
@@ -124,8 +132,20 @@ class App : Application(), ImageLoaderFactory {
         .crossfade(false)
         .build()
 
+    /**
+     * The offscreen browser used for Cloudflare-gated scrape pages.
+     *
+     * One instance for the process: it serialises its own WebView behind a
+     * semaphore, so reuse is what keeps a burst of episode scrapes from opening
+     * several heavy rasters at once on a TV box.
+     */
+    private val adBrowser by lazy { me.desidubanime.tv.player.FileHostBrowser(this) }
+
     companion object {
         lateinit var instance: App
             private set
+
+        /** Budget for one gated episode page through the WebView. */
+        private const val AD_PAGE_MS = 25_000L
     }
 }

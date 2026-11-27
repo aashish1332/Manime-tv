@@ -64,7 +64,6 @@ fun WatchCard(
                     .data(entry.posterUrl.ifBlank { null })
                     .size(300, 450)               // 2:3 thumbnail same as AnimeCard
                     .addHeader("User-Agent", Api.USER_AGENT)
-                    .addHeader("Referer", Api.REFERER)
                     // removed crossfade for smoother scrolling
                     .build(),
                 contentDescription = entry.animeTitle,

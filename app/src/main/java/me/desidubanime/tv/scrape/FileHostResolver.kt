@@ -168,19 +168,19 @@ object FileHostResolver {
         .build()
 
     /**
-     * Client for ToonWorld4All's /redirect/ interstitial: SAME timeouts and
-     * headers, NO COOKIES.
+     * GDFlix's mint, on its OWN call budget.
      *
-     * The site gates files with a 24-hour "verification" session. The FIRST
-     * token view of a fresh visitor renders the page (and sets its
-     * `pending_verify` cookie); every later token view for that same visitor is
-     * a 302 to the ad shortener instead. Sharing [probeClient]'s jar therefore
-     * turned every T4A row after the first into a redirect that had nothing to
-     * parse. A cookie-less client makes each token view a first view, so the
-     * page — and its props — always come back. Verified live 2026-11.
+     * The mint is three blocking requests (page -> POST /mfile -> 1-byte probe
+     * of the minted CDN URL). They used to run inside a coroutine timeout,
+     * which cannot interrupt blocking OkHttp: it only threw the FINISHED result
+     * away. Each request is bounded here instead, and the session cookies are
+     * still shared with [probeClient] because the POST is validated against
+     * them.
      */
-    private val anonymousClient: OkHttpClient = probeClient.newBuilder()
-        .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+    private val gdflixClient: OkHttpClient = probeClient.newBuilder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(9, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
         .build()
 
     /**
@@ -301,19 +301,30 @@ object FileHostResolver {
             // so it gets the larger slice. Killing it at 8s meant the proven
             // path never finished on a slow box and the cost was paid twice by
             // the plain-HTTP fallback below.
-            val instantBudget = msLeft(deadline).coerceAtMost(12_000L)
-            if (instantBudget >= 1_000L) {
-                val mint = kotlinx.coroutines.withTimeoutOrNull(instantBudget) { gdflixInstant(pageUrl) }
+            // NO withTimeoutOrNull AROUND THIS. gdflixInstant is blocking
+            // OkHttp, so a coroutine timeout cannot interrupt it — it only
+            // DISCARDS THE RESULT. The page fetch (43KB), the mint POST and
+            // the 1-byte probe of the minted URL take ~5-10s together on a
+            // desktop path and longer on a TV, so a 12s window threw away
+            // mints that had ALREADY SUCCEEDED. The row then fell through to
+            // the crawl and browser stages, which cannot resolve a minted CDN
+            // link, and the viewer saw GDFlix fail on a link that was alive.
+            // Each request is bounded by gdflixClient's own call timeout.
+            if (msLeft(deadline) >= 1_000L) {
+                val mint = runCatching { gdflixInstant(pageUrl) }
+                    .onFailure {
+                        DebugLog.log("gdflix", "mint threw ${it.javaClass.simpleName}: ${it.message}")
+                    }
+                    .getOrNull()
                 mint?.stream?.let {
                     DebugLog.log("resolve", "GDFlix instant OK -> ${short(it.url)}")
                     return@withContext it
                 }
                 if (mint?.removed == true) {
                     // The upload is GONE (site's own "file no longer
-                    // available" page). No browser session can bring it back,
-                    // so the 15-60s WebView pass below would only be dead
-                    // waiting — which is what the viewer saw as "GDFlix says
-                    // no stream found right after selecting it".
+                    // available" page, or every action's minted URL rejected).
+                    // No browser session can bring it back, so the 15-60s
+                    // WebView pass below would only be dead waiting.
                     DebugLog.log("resolve", "GDFlix: upload removed site-side — not worth a browser pass")
                     return@withContext null
                 }
@@ -852,35 +863,6 @@ object FileHostResolver {
     }
 
     /**
-     * The REAL file-host URL behind a T4A `/redirect/<token>` interstitial.
-     *
-     * One plain GET returns the page's own props (verified live):
-     *   window.__PROPS__ = {"userSystem":"24hour",
-     *                       "destination":"https://shrinkme.click/…",  <- the ad
-     *                       "link":{"domain":"https://gdflix.dev/file/",
-     *                               "hidden":"12n00zvrf7ek31m"},"total":4}
-     * `destination` is the ad-shortener the site WANTS you to open; `link` is
-     * the hoster path the file actually lives behind. Joining the two needs no
-     * ad view, no QR scan and no browser.
-     */
-    private fun redirectTargetOf(pageUrl: String): String? {
-        // COOKIE-LESS on purpose: with the session jar the second token view of
-        // a visit is a 302 to the shortener, so the props were only ever
-        // readable for the first T4A row of a session (verified live).
-        val html = get(pageUrl, System.currentTimeMillis() + REDIRECT_BUDGET_MS, anonymous = true)
-            ?: return null
-        // The props are a single line of JSON on the interstitial page.
-        val props = Regex("""window\.__PROPS__\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.groupValues?.get(1)
-        val linkObj = Regex(""""link"\s*:\s*(\{[^{}]*\})"""").find(props ?: html)?.groupValues?.get(1)
-            ?: return null
-        val domain = Regex(""""domain"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
-        val hidden = Regex(""""hidden"\s*:\s*"([^"]+)"""").find(linkObj)?.groupValues?.get(1).orEmpty()
-        if (!domain.startsWith("http") || hidden.isBlank()) return null
-        return domain.trimEnd('/') + "/" + hidden.removePrefix("/")
-    }
-
-    /**
      * Which dedicated resolver a URL deserves. Deliberately derived from the
      * RESOLVED url, not from the label the site printed on its card — T4A and
      * the ADH mirrors both mislabel rows, and a token can point anywhere.
@@ -905,13 +887,16 @@ object FileHostResolver {
      * the follow-up API only exists on that final origin — so the final URL is
      * part of the answer, not a detail.
      */
-    private fun fetchFollowing(url: String): Pair<String, String>? = try {
+    private fun fetchFollowing(
+        url: String,
+        client: OkHttpClient = probeClient,
+    ): Pair<String, String>? = try {
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", Api.USER_AGENT)
             .header("Accept", "text/html,application/xhtml+xml,*/*")
             .build()
-        probeClient.newCall(req).execute().use { resp ->
+        client.newCall(req).execute().use { resp ->
             val finalUrl = resp.request.url.toString()
             val body = if (resp.isSuccessful) readCapped(resp) else null
             if (body == null) {
@@ -1064,13 +1049,19 @@ object FileHostResolver {
      * returning a URL that the CDN rejects is conclusive, and the caller has to
      * be able to tell that apart from "inconclusive".
      */
-    private fun statusOf(url: String): Int? = try {
+    private fun statusOf(url: String, referer: Boolean = true): Int? = try {
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", Api.USER_AGENT)
             .header("Range", "bytes=0-1")
+            .apply {
+                // The shared interceptor stamps the origin as Referer. A CDN that
+                // objects to that answers 403, so the caller can ask for a
+                // referer-free retry before condemning the file.
+                if (!referer) header("Referer", "")
+            }
             .build()
-        probeClient.newCall(req).execute().use { it.code }
+        gdflixClient.newCall(req).execute().use { it.code }
     } catch (e: Exception) {
         null
     }
@@ -1286,7 +1277,6 @@ object FileHostResolver {
         url: String,
         deadline: Long,
         browser: Browser? = null,
-        anonymous: Boolean = false,
     ): String? = try {
         val left = deadline - System.currentTimeMillis()
         if (left <= 0) {
@@ -1301,7 +1291,7 @@ object FileHostResolver {
                 // no second WebView hop is needed.
                 .apply { browser?.cookiesFor(url)?.let { header("Cookie", it) } }
                 .build()
-            (if (anonymous) anonymousClient else probeClient).newCall(req).execute().use { resp ->
+            probeClient.newCall(req).execute().use { resp ->
                 val body = if (resp.isSuccessful) readCapped(resp) else null
                 DebugLog.log(
                     "http",
@@ -1383,7 +1373,7 @@ object FileHostResolver {
      * that don't offer them, which is why they are only tried afterwards.
      */
     private suspend fun gdflixInstant(pageUrl: String): GdfMint = withContext(Dispatchers.IO) {
-        val fetched = fetchFollowing(pageUrl) ?: return@withContext GdfMint()
+        val fetched = fetchFollowing(pageUrl, gdflixClient) ?: return@withContext GdfMint()
         val (finalUrl, html) = fetched
         if (looksLikeChallenge(html)) {
             DebugLog.log("gdflix", "challenge on ${short(finalUrl)}")
@@ -1406,6 +1396,7 @@ object FileHostResolver {
         val host = Regex("""^(https?://[^/]+)""").find(finalUrl)?.groupValues?.get(1) ?: return@withContext GdfMint()
         val tokenHost = host.removePrefix("https://").removePrefix("http://")
         val mPath = if (finalUrl.contains("/file/")) finalUrl.replace("/file/", "/mfile/") else finalUrl
+        var deadMint = false
         for ((action, target) in listOf("instant" to mPath, "direct" to finalUrl, "original" to finalUrl)) {
             val body = okhttp3.FormBody.Builder()
                 .add("action", action)
@@ -1418,7 +1409,7 @@ object FileHostResolver {
                 .header("x-token", tokenHost)
                 .header("Referer", finalUrl)
                 .build()
-            val json = runCatching { probeClient.newCall(req).execute().use { readCapped(it) } }.getOrNull()
+            val json = runCatching { gdflixClient.newCall(req).execute().use { readCapped(it) } }.getOrNull()
                 ?: continue
             val raw = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
                 ?: Regex(""""visit_url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
@@ -1440,13 +1431,33 @@ object FileHostResolver {
             // SPA, and re-minting yields the same dead token. The crawl and
             // browser stages below therefore cannot succeed — they only add a
             // WebView session before the row dies.
+            // A 4xx FROM THE CDN MEANS THIS ACTION'S URL IS DEAD, NOT THAT THE
+            // ROW IS. "direct" and "original" can mint a DIFFERENT URL for the
+            // same upload, and they used to be skipped entirely — the row died
+            // on the first rejected mint even though a sibling action could
+            // still have produced a live file. Every action is now tried; only
+            // when ALL of them hand back a rejected URL is the upload gone.
+            //
+            // 403/429 get one re-probe WITHOUT the referer first: a CDN that
+            // dislikes a foreign referer answers 403, a probe burst answers
+            // 429, and neither says anything about the file. 400 does
+            // (measured: a dead Drive copy answers 400, `Content-Length: 0`,
+            // `Server: UploadServer` — byte-identical to a garbage token).
             val mintedStatus = statusOf(url)
-            if (mintedStatus != null && mintedStatus in 400..499) {
-                DebugLog.log(
-                    "gdflix",
-                    "$action minted URL rejected ($mintedStatus) — upload dead, failing row now",
-                )
-                return@withContext GdfMint(removed = true)
+            val deadStatus = when {
+                mintedStatus == null -> false
+                mintedStatus == 403 || mintedStatus == 429 -> {
+                    val retry = statusOf(url, referer = false)
+                    DebugLog.log("gdflix", "$action re-probe without referer -> $retry")
+                    retry != null && retry in 400..499
+                }
+                mintedStatus in 400..499 -> true
+                else -> false
+            }
+            if (deadStatus) {
+                DebugLog.log("gdflix", "$action minted URL rejected ($mintedStatus)")
+                deadMint = true
+                continue
             }
             when (verdictOf(url, browser = null, method = "GET", ranged = true)) {
                 Verdict.FILE -> return@withContext GdfMint(stream(url, null))
@@ -1457,6 +1468,7 @@ object FileHostResolver {
                 else -> Unit
             }
         }
+        if (deadMint) return@withContext GdfMint(removed = true)
         GdfMint()
     }
 
@@ -1771,39 +1783,6 @@ object FileHostResolver {
     /** Cap for the single confirmation probe after __PROPS__ resolution. */
     private const val PROBE_DEADLINE_MS = 8_000L
 
-    /** One plain GET of a T4A /redirect/ interstitial must never hang a resolve. */
-    private const val REDIRECT_BUDGET_MS = 12_000L
-
-    /** One GET of a T4A props target, to tell a real hoster page from a decoy. */
-    private const val TW_PROPS_PROBE_MS = 6_000L
-
-    /**
-     * Below this a body is an error stub, not a hoster page. Live decoys answer
-     * "! File Not Found" in 20 bytes; the smallest real page seen is ~19.6KB.
-     */
-    private const val TW_DECOY_PAGE_BYTES = 600
-
-    /**
-     * How long T4A rows are skipped after a decoy was detected. Its gate is the
-     * site's own captcha, so a retry cannot succeed until a human clears it in
-     * a browser; ten minutes keeps a re-skin or a cleared gate from waiting a
-     * whole session while never charging the viewer a request per menu pick.
-     */
-    private const val TW_GATE_TTL_MS = 10 * 60_000L
-
-    /** Millis until which ToonWorld4All is known to be serving its ad gate. */
-    @Volatile
-    private var twGateUntil = 0L
-
-    /**
-     * True while ToonWorld4All's files are known to be behind its captcha gate.
-     *
-     * Public on purpose: the player hides those rows from the server menu while
-     * it holds, so the viewer is never offered a row that cannot resolve and no
-     * batch spends a round trip on one.
-     */
-    fun twGated(): Boolean = System.currentTimeMillis() < twGateUntil
-
     /**
      * Hoster families that no longer work at all, so their rows are never offered.
      *
@@ -1814,26 +1793,6 @@ object FileHostResolver {
     fun isRetired(hoster: String): Boolean {
         val h = hoster.lowercase()
         return h.contains("filepress") || h.contains("filebee") || h.contains("fpgo")
-    }
-
-    /**
-     * The hoster page a ToonWorld4All `/redirect/` token points at RIGHT NOW,
-     * or null while the site is still serving its captcha gate.
-     *
-     * This is the probe the unlock screen polls: the phone clears the gate on
-     * the site, and the next poll sees a real props target (a hoster page)
-     * instead of the decoy (the host's ~20-byte "File Not Found"). It is also
-     * what clears [twGateUntil], so the rows become resolvable again.
-     */
-    suspend fun twTokenTarget(tokenUrl: String): String? = withContext(Dispatchers.IO) {
-        if (!tokenUrl.contains("/redirect/", ignoreCase = true)) return@withContext null
-        val target = redirectTargetOf(tokenUrl) ?: return@withContext null
-        if (target.contains("mega.nz/", ignoreCase = true)) return@withContext null
-        val page = get(target, System.currentTimeMillis() + TW_PROPS_PROBE_MS)
-            ?: return@withContext null
-        if (page.length < TW_DECOY_PAGE_BYTES) return@withContext null
-        twGateUntil = 0L
-        target
     }
 
     /** Reading Drive's confirmation page (one small HTML GET). */

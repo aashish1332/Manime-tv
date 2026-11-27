@@ -217,7 +217,7 @@ private fun HomeSections(
             sectionHeader("Continue Watching")
             item(key = "row-continue", span = { GridItemSpan(maxLineSpan) }) {
 LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    rowItems(continueWatching, key = { it.animeId }) { entry ->
+                    rowItems(continueWatching, key = { it.animeId }, contentType = { "watch-card" }) { entry ->
                         WatchCard(
                             entry = entry,
                             onClick = { onResumeWatch(entry) },
@@ -237,7 +237,7 @@ LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             animeRow("new-releases", feed.newReleases, ::openAnime, ::badge)
         }
         sectionHeader("All Anime")
-        items(feed.all, key = { it.id }) { anime ->
+        items(feed.all, key = { it.id }, contentType = { "anime-card" }) { anime ->
             val b = badge(anime)
             AnimeCard(
                 anime = anime,
@@ -446,7 +446,7 @@ private fun androidx.compose.foundation.lazy.grid.LazyGridScope.animeRow(
 ) {
     item(key = "row-$key", span = { GridItemSpan(maxLineSpan) }) {
         LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            rowItems(anime, key = { it.id }) { a ->
+            rowItems(anime, key = { it.id }, contentType = { "anime-card" }) { a ->
                 val b = badge(a)
                 AnimeCard(
                     anime = a,

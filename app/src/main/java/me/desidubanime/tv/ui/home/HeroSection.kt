@@ -210,7 +210,6 @@ private fun heroImage(
     .data(url.ifBlank { null })
     .size(width, height)
     .addHeader("User-Agent", Api.USER_AGENT)
-    .addHeader("Referer", Api.REFERER)
     .crossfade(true)
     .build()
 

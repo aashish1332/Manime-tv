@@ -167,10 +167,7 @@ class StreamResolver(private val appContext: Context) {
                 timeout = Runnable { settle(Playable.Embed(embedUrl)) }
                     .also { main.postDelayed(it, timeoutMs) }
 
-                wv.loadUrl(
-                    embedUrl,
-                    mapOf("Referer" to Api.REFERER),
-                )
+                wv.loadUrl(embedUrl)
             }
         }
 
@@ -209,8 +206,8 @@ class StreamResolver(private val appContext: Context) {
     )
 
     private fun refererFor(embedUrl: String): String {
-        val m = Regex("""^(https?://[^/]+)""").find(embedUrl)
-        return (m?.groupValues?.get(1) ?: Api.HOST) + "/"
+        val origin = Regex("""^(https?://[^/]+)""").find(embedUrl)?.groupValues?.get(1)
+        return if (origin != null) "$origin/" else ""
     }
 
     private companion object {

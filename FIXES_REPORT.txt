@@ -1414,3 +1414,89 @@ CHECKS
 - :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,641,601 bytes)
 NOT VERIFIED: no adb/device — the WebView pass on link.animedrive.in, the
 relay-only unlock and the marker on every T4A row are compiled, not watched.
+
+================================================================
+K. v1.2.7 — WHY GDFLIX STILL FAILED, AND WHY AD/T4A VANISHED
+================================================================
+
+1. GDFLIX (the resolve path, named exactly)
+
+FileHostResolver.resolve() -> gdflixInstant() ran inside
+kotlinx.coroutines.withTimeoutOrNull(12_000) { ... }. That block is BLOCKING
+OkHttp: a coroutine timeout cannot interrupt it, it only CANCELS THE RESULT.
+Measured here: page fetch (45 KB) + POST /mfile + 1-byte probe of the minted
+URL = ~5-10 s together, and a TV is slower. So a mint that had ALREADY
+SUCCEEDED was thrown away, the row fell through to the crawl and WebView
+stages (which cannot resolve a minted CDN link), and the viewer saw "no
+stream" for a file that was alive.
+
+- The mint is no longer wrapped in a coroutine timeout. Each request is
+  bounded by its own OkHttp call timeout (gdflixClient: 10 s call, 9 s read).
+- A 4xx from the minted URL no longer kills the row on the FIRST action.
+  "instant", "direct" and "original" can each mint a DIFFERENT url for the
+  same upload; all three are tried and only an all-rejected result marks the
+  upload removed (which still ends the row at once, as before).
+- 403/429 are re-probed once WITHOUT the Referer before being called dead:
+  a CDN that dislikes a foreign referer answers 403, and a probe burst
+  answers 429. A 400 stays conclusive (measured: dead Drive copy, CL=0,
+  Server: UploadServer).
+- Checks ran offline for the exact request shape the app uses (UA + Range:
+  bytes=0-1 + self-Referer): 200 video/mkv, so the probe itself was never the
+  problem - the discarded result was.
+
+2. ONLY ADH SERVERS ON A CARD TAGGED ADH + AD + T4A
+
+AnimeRepository.episodesUncached() ran the on-demand AnimeDrive and
+ToonWorld4All lookups behind `if (... && animeId > 0)`. A positive id was a
+DesiDubAnime post id; with that site answering Cloudflare's challenge every
+surviving card has a NEGATIVE id, so those lookups never ran and only ADH's
+hub links were left.
+
+- Both lookups are ungated now: every card resolves its AD and T4A posts.
+- The AnimeDrive browser bridge is installed in App.onCreate(), not in the
+  player's ViewModel. link.animedrive.in is Cloudflare-gated, and the detail
+  screen (which builds the episode list) was running before any player
+  existed, so its AD page was always empty.
+- ToonWorld4All's episode pages moved to archive.toonworld4all.me and its
+  props moved from files[] to encodes[]; the parser already reads encodes[],
+  so with the gate gone those rows appear again (marked " . unlock" - the
+  redirect tokens are still decoys, verified: hidden id -> 404 stub, GDFlix
+  token -> shrinkme.click).
+
+3. DESIDUBANIME.ME REMOVED COMPLETELY
+
+Live check 2026-11-27, python + curl, from this machine:
+  https://desidubanime.me/                    403 cf-mitigated: challenge
+  https://www.desidubanime.me/                403 cf-mitigated: challenge
+  .../wp-json/wp/v2/posts?per_page=1          403 cf-mitigated: challenge
+Body: "Just a moment... Enable JavaScript and cookies to continue".
+
+The app is OkHttp; it can never pass a JS challenge, so every DDA request
+was dead weight on launch and every DDA-sourced list was silently empty.
+
+Removed: Api.HOST/BASE/WP/AJAX/REFERER/setHost, WpService, EpisodeScraper,
+TitleScraper, EpisodeModels (get_episodes), WpAnime/WpEpisodePost, the DDA
+host setting in Settings, the DDA card/source badge, the DDA episode fetch
+and watchUrl branch, the CLOUD/mirror server helpers, the DDA slug/title
+sweeps, and mergeAdhFirst's three DDA passes (it now just builds one card per
+AnimeDubHindi post). res/values strings are untouched by design.
+
+4. UI SMOOTHNESS (what changed; what is already tuned)
+
+- contentType on the home grid, both card rows, the search grid and the
+  detail episode grid: Compose now reuses slots while scrolling instead of
+  rebuilding each cell's composition.
+- Already in place from earlier rounds and left alone (all measured, not
+  guessed): Coil RGB_565 with a 300x450 decode and no crossfade; focused-only
+  marquee; hero images remembered per poster at 640x360/256x384; feed merge
+  on a dedicated lane with disk writes after paint; background sweeps behind
+  InteractionGate; 2 concurrent WebView resolves; NO coroutine timeouts
+  around blocking OkHttp (fixed for GDFlix above).
+
+CHECKS
+- :app:compileDebugKotlin BUILD SUCCESSFUL
+- :app:searchCheck PASS - 19 checks
+- :app:assembleDebug BUILD SUCCESSFUL (app-debug.apk 23,266,780 bytes)
+NOT VERIFIED: no adb/TV here. On-device: GDFlix playback, the AD WebView page
+on link.animedrive.in, T4A rows in the menu, and frame timing are compiled
+and built, not watched.

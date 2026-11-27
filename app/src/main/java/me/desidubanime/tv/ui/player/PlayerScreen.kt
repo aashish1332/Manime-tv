@@ -1022,7 +1022,7 @@ private fun EmbedPlayer(url: String, onWebView: (WebView?) -> Unit = {}) {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
-                loadUrl(url, mapOf("Referer" to Api.REFERER))
+                loadUrl(url)
             }
         },
         onRelease = { wv ->

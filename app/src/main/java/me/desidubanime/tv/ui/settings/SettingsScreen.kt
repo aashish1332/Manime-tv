@@ -51,7 +51,6 @@ fun SettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var url by remember { mutableStateOf("") }
-    var ddaUrl by remember { mutableStateOf("") }
     var adUrl by remember { mutableStateOf("") }
     var twUrl by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf(false) }
@@ -63,7 +62,6 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         url = settings.adhBase()
-        ddaUrl = settings.ddaBase()
         adUrl = settings.adBase()
         twUrl = settings.twBase()
         // Keep a previous run's result visible when the screen is reopened.
@@ -110,23 +108,6 @@ fun SettingsScreen(onBack: () -> Unit) {
         )
 
         Spacer(Modifier.height(16.dp))
-        Text("DesiDubAnime website URL", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "If DDA's domain changes, put the new link here. It applies immediately after saving — no restart needed.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = 8.dp),
-        )
-        OutlinedTextField(
-            value = ddaUrl,
-            onValueChange = { ddaUrl = it; saved = false },
-            modifier = Modifier.fillMaxWidth(0.7f).padding(vertical = 8.dp),
-            singleLine = true,
-            colors = fieldColors,
-            label = { Text(me.desidubanime.tv.data.api.Api.DEFAULT_HOST) },
-        )
-
-        Spacer(Modifier.height(16.dp))
         Text("AnimeDrive website URL", style = MaterialTheme.typography.titleMedium)
         Text(
             "If AnimeDrive (AD) domain changes, put the new link here. Feed will refresh after save.",
@@ -164,18 +145,12 @@ fun SettingsScreen(onBack: () -> Unit) {
             Button(onClick = {
                 scope.launch {
                     settings.setAdhBaseUrl(url)
-                    settings.setDdaBaseUrl(ddaUrl)
                     settings.setAdBaseUrl(adUrl)
                     settings.setTwBaseUrl(twUrl)
-                    // DDA's Retrofit reads Api.HOST per request (dynamic host
-                    // interceptor) — point it at the new domain right away so
-                    // no restart is needed.
-                    me.desidubanime.tv.data.api.Api.setHost(settings.ddaBase())
                     // Old-domain posts/cards must not linger: drop them so the
                     // next feed/detail load re-scrapes from the new sites.
                     ServiceLocator.repository.invalidateAllSourceCaches()
                     url = settings.adhBase()
-                    ddaUrl = settings.ddaBase()
                     adUrl = settings.adBase()
                     twUrl = settings.twBase()
                     saved = true
@@ -185,15 +160,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             Button(onClick = {
                 scope.launch {
                     settings.setAdhBaseUrl("")
-                    settings.setDdaBaseUrl("")
                     settings.setAdBaseUrl("")
                     settings.setTwBaseUrl("")
-                    me.desidubanime.tv.data.api.Api.setHost(
-                        me.desidubanime.tv.data.api.Api.DEFAULT_HOST,
-                    )
                     ServiceLocator.repository.invalidateAllSourceCaches()
                     url = settings.adhBase()
-                    ddaUrl = settings.ddaBase()
                     adUrl = settings.adBase()
                     twUrl = settings.twBase()
                     saved = true

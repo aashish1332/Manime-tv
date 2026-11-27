@@ -181,7 +181,7 @@ fun SearchScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
-                            items(s.data, key = { it.id }) { anime ->
+                            items(s.data, key = { it.id }, contentType = { "anime-card" }) { anime ->
                                 AnimeCard(anime = anime, onClick = { onOpenAnime(anime) })
                             }
                         }

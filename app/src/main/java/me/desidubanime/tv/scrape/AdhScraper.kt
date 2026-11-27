@@ -128,16 +128,12 @@ class AdhScraper(private val settings: AppSettings) {
             return AdhEpisodePage(emptyList())
         }
 
-        // The "Watch online" anchor points at our DDA /anime/ page. Prefer a
-        // link on the configured DDA host (the site may add its own /anime/
-        // nav links someday); fall back to any /anime/ link.
-        val ddaHost = Api.HOST.removePrefix("https://").removePrefix("http://")
-        val ddaSlug = doc.select("a[href*=/anime/]")
-            .firstOrNull { it.attr("abs:href").contains(ddaHost) }
-            ?.attr("href")
-            ?.let { Regex("""/anime/([^/?#]+)""").find(it)?.groupValues?.get(1) }
-            ?: doc.select("a[href*=/anime/]").firstOrNull()?.attr("href")
-                ?.let { Regex("""/anime/([^/?#]+)""").find(it)?.groupValues?.get(1) }
+        // There is no cross-site slug to learn any more: the adhlinks page's
+        // "Watch online" anchor pointed at desidubanime.me, which now answers
+        // every request with a Cloudflare challenge. The field stays on the
+        // return type (AnimeDrive and ToonWorld share the shape) and is always
+        // null.
+        val ddaSlug: String? = null
 
         // STRICT episode matcher. The old pattern allowed a bare "E", which
         // matched inside words: "480P x264 [Size: 69mb]" matched "e: 69" and
