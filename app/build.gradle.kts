@@ -17,8 +17,8 @@ android {
         targetSdk = 34
         // versionCode/versionName are what the in-app updater compares against
         // the GitHub release tag — bump versionCode on every published build.
-        versionCode = 9
-        versionName = "1.2.6"
+        versionCode = 10
+        versionName = "1.2.7"
     }
 
     buildTypes {
